@@ -1,5 +1,5 @@
 /*!
- * Lampa English Torrent Sources v1.0.1
+ * Lampa English Torrent Sources v1.0.2
  * ------------------------------------------------------------------
  * Плагин добавляет зарубежные торрент-источники с контентом
  * на английском языке: Nyaa.si, AniDex, YTS, EZTV, Torrentio,
@@ -13,6 +13,10 @@
  * Установка: Настройки -> Расширения -> Добавить плагин -> вставить
  * ссылку на этот файл (https://USERNAME.github.io/REPO/en_sources.js)
  *
+ * Changelog 1.0.2:
+ *   - исправлена инициализация: если Lampa грузит плагин ПОСЛЕ события
+ *     app/ready, подписка на него не срабатывала и настройки не создавались;
+ *     теперь есть проверка window.appready + страховочный таймер
  * Changelog 1.0.1:
  *   - parseTG/parseNyaa без jQuery (DOMParser + fallback)
  *   - проверка поддержки DOMParser
@@ -36,11 +40,40 @@
         try {
             window.en_sources_plugin = true;
 
-            if (window.appready) addPlugin();
-            else if (window.Lampa && Lampa.Listener) {
-                Lampa.Listener.follow('app', function (e) {
-                    if (e.type == 'ready') addPlugin();
-                });
+            // фиксируем момент загрузки скрипта — если app.ready уже произошёл,
+            // событие 'app'/'ready' мы уже не получим и подписка не сработает
+            var scriptLoadedAt = Date.now();
+
+            function boot() {
+                // ЛАМПА может грузить плагины ПОСЛЕ события ready (full.js /
+                // накопительный загрузчик расширений) — в этом случае
+                // Lampa.Listener.follow('app', ready) никогда не вызовется.
+                // Поэтому дополнительно проверяем window.appready.
+                if (window.appready) { addPlugin(); return; }
+
+                var booted = false;
+                function go() { if (!booted) { booted = true; addPlugin(); } }
+
+                if (window.Lampa && Lampa.Listener && Lampa.Listener.follow) {
+                    Lampa.Listener.follow('app', function (e) {
+                        if (e.type == 'ready') go();
+                    });
+                }
+
+                // страховка: если скрипт загрузился через N секунд после ready,
+                // событие мы уже пропустили — инициализируемся напрямую
+                setTimeout(function () {
+                    if (!booted && (window.appready || Date.now() - scriptLoadedAt > 6000)) go();
+                }, 3000);
+            }
+
+            if (window.Lampa && Lampa.Listener) boot();
+            else {
+                // Lampa ещё не определён — ждём его появления
+                var wait = setInterval(function () {
+                    if (window.Lampa && Lampa.Listener) { clearInterval(wait); boot(); }
+                }, 250);
+                setTimeout(function () { clearInterval(wait); }, 30000);
             }
         } catch (e) {
             safeLog('[EN Sources] init error', e);
@@ -57,7 +90,7 @@
 
     function initPlugin() {
 
-        var VERSION = '1.0.1';
+        var VERSION = '1.0.2';
         var DEFAULT_PROXY = 'https://corsproxy.io/?url=';
 
         // ==================== ИСТОЧНИКИ ====================
