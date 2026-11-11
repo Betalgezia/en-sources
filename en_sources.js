@@ -1696,12 +1696,13 @@
         var v = Lampa.Storage.get(PREFIX + 'src_' + id);
         return v === undefined || v === null ? def : truthy(v);
     }
-    function proxyList() {
-        var list = [], p = String(Lampa.Storage.get('en_sources_v2_proxy', '') || '');
+       function proxyList() {
+        var list = [''];
+        var p = String(Lampa.Storage.get('en_sources_v2_proxy', '') || '');
         if (p) list.push(p);
         for (var i = 0; i < PROXY_FALLBACKS.length; i++) list.push(PROXY_FALLBACKS[i]);
-        list.push('');
         return list;
+    }
     }
     function wrapProxy(u, p) {
         if (!p) return u;
