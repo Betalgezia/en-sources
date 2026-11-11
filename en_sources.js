@@ -1912,22 +1912,49 @@
         safety = setTimeout(fin, 40000);
         tasks.forEach(function (t) { try { t(complete); } catch (e) { complete(null); } });
     }
-    function summary() {
+        function summary() {
         var parts = [], i, s, id;
         for (i = 0; i < SOURCES.length; i++) {
             s = SOURCES[i]; id = s.id;
             if (!srcOn(id)) { parts.push(s.title + ': выкл'); continue; }
-            if (LAST.errors[id]) parts.push(s.title + ': ' + LAST.errors[id]);
-            else parts.push(s.title + ': ' + (LAST.counts[id] || 0));
+            if (LAST.counts[id] !== undefined) { parts.push(s.title + ': ' + LAST.counts[id]); continue; }
+            if (LAST.errors[id]) { parts.push(s.title + ': ' + LAST.errors[id]); continue; }
+            parts.push(s.title + ': не запрашивался');
         }
         return parts.join(' · ');
     }
     function testPublic() {
-        try { Lampa.Noty.show('Проверяю публичные трекеры...'); } catch (e) {}
-        search({ search: 'Plan 9 from Outer Space', movie: { title: 'Plan 9 from Outer Space', original_title: 'Plan 9 from Outer Space', imdb_id: 'tt0052077' } }, function () {
-            console.log('[EN Public] test:', LAST.text);
-            try { Lampa.Noty.show(LAST.text, { time: 9000 }); } catch (e) {}
-        });
+        try { Lampa.Noty.show('Проверяю: фильм, сериал, аниме...'); } catch (e) {}
+        var probes = [
+            { search: 'Inception', movie: { title: 'Inception', original_title: 'Inception', imdb_id: 'tt1375666' } },
+            { search: 'Breaking Bad', movie: { title: 'Breaking Bad', original_name: 'Breaking Bad', number_of_seasons: 5, season_number: 1, episode_number: 1, imdb_id: 'tt0903747' } },
+            { search: 'Naruto', movie: { title: 'Naruto', original_name: 'Naruto', number_of_seasons: 1, season_number: 1, episode_number: 1, imdb_id: 'tt0409591', original_language: 'ja', genres: [{ id: 16 }] } }
+        ];
+        var merged = { counts: {}, errors: {} };
+        var idx = 0;
+        function step() {
+            if (idx >= probes.length) {
+                LAST.counts = merged.counts;
+                LAST.errors = merged.errors;
+                LAST.time = Date.now();
+                LAST.text = summary();
+                console.log('[EN Public] test:', LAST.text);
+                try { Lampa.Noty.show(LAST.text, { time: 12000 }); } catch (e) {}
+                return;
+            }
+            var n = idx + 1;
+            try { Lampa.Noty.show('Проверка ' + n + '/3...'); } catch (e) {}
+            var p = probes[idx++];
+            search(p, function () {
+                for (var i = 0; i < SOURCES.length; i++) {
+                    var id = SOURCES[i].id;
+                    if (LAST.counts[id] !== undefined) merged.counts[id] = Math.max(merged.counts[id] || 0, LAST.counts[id]);
+                    else if (LAST.errors[id] && merged.counts[id] === undefined) merged.errors[id] = LAST.errors[id];
+                }
+                step();
+            });
+        }
+        step();
     }
     function register() {
         if (registered) return true;
