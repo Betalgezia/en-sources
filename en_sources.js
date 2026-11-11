@@ -1,37 +1,52 @@
-
 /*!
- * EN Sources 2.0.0 — одиночный плагин для Lampa
+ * EN Sources 3.1.0 — одиночный плагин для Lampa
  * ---------------------------------------------------------------------------
+ * Один модуль, один перехват Lampa.Parser.get. Публичные зарубежные трекеры
+ * (Nyaa, AniDex, Torrentio, YTS, EZTV, The Pirate Bay) объединяются со
+ * штатным парсером Lampa. Зарубежные раздачи выводятся первыми, внутри них —
+ * самые популярные (по сидам).
+ *
  * Установка: Настройки -> Расширения -> Добавить плагин -> URL этого файла.
- * Пример: https://betalgezia.github.io/en-sources/en_sources.js?v=2
  *
- * Совместимость: веб-ядро Lampa 2.x/3.x; Android-оболочка LAMPA 1.13.5.
- * Версия 1.13.5 — это версия Android-оболочки, а не обязательно веб-ядра.
+ * Что исправлено относительно 2.13.0:
+ *   - не два плагина, а один (раньше два модуля одновременно оборачивали
+ *     Lampa.Parser.get и «дрались» за порядок результатов);
+ *   - тумблеры источников: Storage.get() для отсутствующего ключа возвращает
+ *     '' (пустую строку), поэтому все источники по умолчанию были выключены.
+ *     Теперь '' трактуется как «использовать дефолт»;
+ *   - Nyaa для сериалов больше не «показывает один последний эпизод»: раньше
+ *     шёл поиск по новизне (s=id&o=desc) на 3 страницах, и в топ попадали
+ *     только свежие загрузки финальных эпизодов. Теперь поиск идёт по
+ *     популярности (s=seeders&o=desc) + добавляются запросы сезона/пака;
+ *   - Nyaa HTML-парсер: название бралось из первой ссылки на /view/ID,
+ *     которой часто оказывалась ссылка комментария «21 comments». Теперь
+ *     берётся ссылка /view/ID без #comments;
+ *   - не используем CORS-прокси: у вас своё средство обхода блокировок.
+ *     Все запросы прямые, с браузерным User-Agent (для Cloudflare);
+ *   - убрана привязка к «en_sources_v2_enabled» (два рубильника путали);
+ *   - для YTS/EZTV/Torrentio IMDb ID при необходимости запрашивается из
+ *     TMDB external_ids (у карточки Lampa его часто нет).
  *
- * Что исправлено относительно 1.0.x:
- *   - отдельный раздел настроек через Lampa.SettingsApi.addComponent;
- *   - переключатель в шапке через Lampa.Head.addIcon;
- *   - триггеры Lampa читаются с нормализацией 'true'/'false';
- *   - событие готовности только app/ready + проверка window.appready;
- *   - один обратный вызов на поиск, отмена запросов и очистка таймеров;
- *   - корректные поля результата Lampa: Size, PublishDate, PublisTime, hash;
- *   - IMDb ID сохраняется в формате ttXXXXXXXX для Torznab/Prowlarr.
- *
- * Источники настраиваются пользователем: Jackett, Prowlarr, Torznab и
- * Internet Archive. Подключайте только те индексаторы и раздачи, на
- * использование которых у вас есть права. Встроенный источник Internet
- * Archive ищет по открытым коллекциям и возвращает только найденные
- * .torrent-файлы.
+ * Встроенных API-ключей нет. Используйте только те источники и раздачи, на
+ * которые у вас есть права.
  */
 (function (window, document) {
     'use strict';
 
-    var VERSION = '2.0.0';
-    var NS = '__lampa_en_sources_v2__';
-    var COMPONENT = 'en_sources';
-    var PREFIX = 'en_sources_v2_';
-    var MAX_SOURCES = 8;
-    var PLUGIN_URL = 'https://betalgezia.github.io/en-sources/en_sources.js';
+    var VERSION = '3.1.0';
+    var NS = '__en_sources_v3__';
+    var COMPONENT = 'en_sources3';
+    var PREFIX = 'en_sources_v3_';
+    var MAX_RESULTS = 300;
+
+    var UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+        '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+    var ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" ' +
+        'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+        '<circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 0 1 0 18' +
+        'M12 3a15 15 0 0 0 0 18"/><path d="m9.8 9.7 4.7 2.3-4.7 2.3z" fill="currentColor" ' +
+        'stroke="none"/></svg>';
 
     if (window[NS] && window[NS].version === VERSION) return;
     if (window[NS] && typeof window[NS].destroy === 'function') {
@@ -43,41 +58,57 @@
 
     var K = {
         enabled: PREFIX + 'enabled',
-        head: PREFIX + 'head',
         merge: PREFIX + 'merge',
         fallback: PREFIX + 'fallback',
-        audio: PREFIX + 'audio',
-        movies: PREFIX + 'movies',
-        tv: PREFIX + 'tv',
-        anime: PREFIX + 'anime',
-        timeout: PREFIX + 'timeout',
-        proxy: PREFIX + 'proxy',
-        notify: PREFIX + 'notify',
-        sources: PREFIX + 'sources'
+        prefer_en: PREFIX + 'prefer_en',
+        hide_ru: PREFIX + 'hide_ru',
+        timeout: PREFIX + 'timeout'
     };
 
-    var ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/><path d="m9.8 9.7 4.7 2.3-4.7 2.3z" fill="currentColor" stroke="none"/></svg>';
-    var HEAD_ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h10"/><circle cx="18" cy="17" r="3"/></svg>';
+    var SOURCES = [
+        { id: 'nyaa', title: 'Nyaa.si', def: true },
+        { id: 'anidex', title: 'AniDex', def: true },
+        { id: 'torrentio', title: 'Torrentio', def: true },
+        { id: 'yts', title: 'YTS', def: true },
+        { id: 'eztv', title: 'EZTV', def: true },
+        { id: 'tpb', title: 'The Pirate Bay', def: false }
+    ];
 
-    var $ = window.jQuery || window.$;
+    var YTS_HOSTS = ['yts.mx', 'yts.rs', 'yts.ag', 'yts.lt'];
+    var EZTV_HOSTS = ['eztvx.to', 'eztv.re', 'eztv.ch'];
+
+    var RU_AUDIO_RE = /(rus|russian|русск|рус\.)[^\n]{0,45}(dub|dubbed|dubbing|audio|mvo|\bvo\b|озвуч|дубл|закадр)|(dub|dubbed|dubbing|audio|mvo|\bvo\b|озвуч|дубл|закадр)[^\n]{0,45}(rus|russian|русск|рус\.)/i;
+    var DUB_RE = /\b(dub|dubbed|dual[ .-]?audio|english[ .-]?dub|eng[ .-]?dub)\b/i;
+    var EN_SUB_RE = /\b(eng(lish)?[\s._-]?sub|multi[\s._-]?sub|subs?|subsplease|erai-raws|horriblesubs)\b|\[multi|\beng\b/i;
+    var CJK_RE = /[\u3000-\u9fff\uff00-\uffef]/;
+
     var cfg = {};
-    var sources = [];
     var state = {
         destroyed: false,
+        started: false,
         hooked: false,
-        hookTimer: null,
+        sortWrapped: false,
+        settings: false,
         bootTimer: null,
-        head: null,
-        settingsName: '',
+        hookTimer: null,
         originalGet: null,
         originalClear: null,
         originalTorrents: null,
         listeners: [],
         searches: {},
-        searchSeq: 0,
-        lastByCard: {},
-        last: null
+        seq: 0,
+        clearTime: 0,
+        last: null,
+        lastByCard: {}
     };
+
+    var resolveCache = {};
+    var imdbCache = {};
+    var $ = window.jQuery || window.$;
+
+    /* ------------------------------------------------------------------ */
+    /* Утилиты                                                             */
+    /* ------------------------------------------------------------------ */
 
     function log() {
         try {
@@ -99,26 +130,16 @@
         } catch (e) {}
     }
 
-    function L(ru, en, uk) {
-        return { ru: ru, en: en, uk: uk || ru };
+    function clean(value) {
+        return String(value == null ? '' : value)
+            .replace(/\s+/g, ' ')
+            .replace(/^\s+|\s+$/g, '');
     }
 
-    function T(key) {
-        try { return Lampa.Lang.translate(key); } catch (e) { return key; }
-    }
-
-    function notify(text) {
-        try { if (Lampa.Noty) Lampa.Noty.show(text, { time: 3500 }); } catch (e) {}
-    }
-
-    function esc(text) {
-        return String(text == null ? '' : text)
+    function esc(value) {
+        return String(value == null ? '' : value)
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    }
-
-    function trim(text) {
-        return String(text == null ? '' : text).replace(/^\s+|\s+$/g, '');
     }
 
     function bool(key, def) {
@@ -135,706 +156,39 @@
         return v == null || v === '' ? def : String(v);
     }
 
-    function setBool(key, value) {
-        try { Lampa.Storage.set(key, value ? 'true' : 'false'); } catch (e) {}
+    function int(value, def) {
+        var n = parseInt(value, 10);
+        return isNaN(n) ? def : n;
+    }
+
+    function truthy(v) {
+        return v === true || v === 'true' || v === 1 || v === '1';
+    }
+
+    function srcOn(id) {
+        var def = false;
+        for (var i = 0; i < SOURCES.length; i++) if (SOURCES[i].id === id) def = SOURCES[i].def;
+        var v;
+        try { v = Lampa.Storage.get(PREFIX + 'src_' + id); } catch (e) { return def; }
+        // Storage.get() для отсутствующего ключа возвращает '' — это и есть
+        // причина, по которой все источники раньше были «выключены».
+        if (v === undefined || v === null || v === '') return def;
+        return truthy(v);
     }
 
     function readConfig() {
-        cfg.enabled = bool(K.enabled, false);
-        cfg.head = bool(K.head, true);
+        cfg.enabled = bool(K.enabled, true);
         cfg.merge = bool(K.merge, true);
         cfg.fallback = bool(K.fallback, true);
-        cfg.audio = str(K.audio, 'prefer');
-        cfg.movies = bool(K.movies, true);
-        cfg.tv = bool(K.tv, true);
-        cfg.anime = bool(K.anime, true);
-        cfg.timeout = parseInt(str(K.timeout, '20'), 10);
-        if (isNaN(cfg.timeout) || cfg.timeout < 5) cfg.timeout = 20;
-        cfg.proxy = trim(str(K.proxy, ''));
-        cfg.notify = bool(K.notify, false);
+        cfg.prefer_en = bool(K.prefer_en, true);
+        cfg.hide_ru = bool(K.hide_ru, false);
+        cfg.timeout = int(str(K.timeout, '20'), 20);
+        if (cfg.timeout < 8) cfg.timeout = 8;
+        if (cfg.timeout > 60) cfg.timeout = 60;
     }
 
-    function defaultSources() {
-        return [{
-            id: 'ia',
-            name: 'Internet Archive',
-            type: 'archive',
-            url: 'https://archive.org',
-            key: '',
-            enabled: true,
-            kind: 'all',
-            collections: 'feature_films',
-            rank: 0
-        }];
-    }
-
-    function cleanSource(src, index) {
-        if (!src || typeof src !== 'object') return null;
-        var type = String(src.type || 'jackett').toLowerCase();
-        if (['jackett', 'prowlarr', 'torznab', 'archive'].indexOf(type) < 0) type = 'jackett';
-        var url = trim(src.url || '');
-        if (type === 'archive' && !url) url = 'https://archive.org';
-        return {
-            id: trim(src.id || '') || ('src_' + index + '_' + Math.floor(Math.random() * 100000)),
-            name: trim(src.name || '') || type,
-            type: type,
-            url: url.replace(/\/+$/, ''),
-            key: trim(src.key || ''),
-            enabled: src.enabled === false || src.enabled === 'false' ? false : true,
-            kind: ['all', 'movie', 'tv', 'anime'].indexOf(String(src.kind || 'all')) >= 0 ? String(src.kind || 'all') : 'all',
-            collections: trim(src.collections || (type === 'archive' ? 'feature_films' : '')),
-            rank: index
-        };
-    }
-
-    function loadSources() {
-        var raw = null;
-        try { raw = Lampa.Storage.get(K.sources, null); } catch (e) {}
-        if (typeof raw === 'string') {
-            try { raw = JSON.parse(raw); } catch (e) { raw = null; }
-        }
-        if (!raw || Object.prototype.toString.call(raw) !== '[object Array]') raw = defaultSources();
-        var out = [];
-        for (var i = 0; i < raw.length && out.length < MAX_SOURCES; i++) {
-            var src = cleanSource(raw[i], i);
-            if (src) out.push(src);
-        }
-        sources = out;
-    }
-
-    function saveSources() {
-        for (var i = 0; i < sources.length; i++) sources[i].rank = i;
-        try { Lampa.Storage.set(K.sources, sources); } catch (e) {}
-    }
-
-    function validUrl(url) {
-        return /^https?:\/\/[^\s]+$/i.test(trim(url));
-    }
-
-    function addQuery(url, pairs) {
-        var parts = [];
-        for (var i = 0; i < pairs.length; i++) {
-            var p = pairs[i];
-            if (p.value == null || p.value === '') continue;
-            parts.push(encodeURIComponent(p.name) + '=' + encodeURIComponent(p.value));
-        }
-        if (!parts.length) return url;
-        return url + (url.indexOf('?') >= 0 ? '&' : '?') + parts.join('&');
-    }
-
-    function proxied(url) {
-        if (!cfg.proxy) return url;
-        if (cfg.proxy.indexOf('{url}') >= 0) return cfg.proxy.replace('{url}', encodeURIComponent(url));
-        return cfg.proxy + encodeURIComponent(url);
-    }
-
-    function request(url, options, done, fail) {
-        var net;
-        try { net = new Lampa.Reguest(); } catch (e) { fail('Reguest unavailable'); return null; }
-        net.timeout(cfg.timeout * 1000);
-        var params = { dataType: options && options.text ? 'text' : 'json' };
-        if (options && options.headers) params.headers = options.headers;
-        try {
-            net.native(proxied(url), function (data) { done(data); }, function (a, b) {
-                var msg = 'network error';
-                try { msg = net.errorDecode(a, b); } catch (e) {}
-                fail(msg);
-            }, false, params);
-        } catch (e) {
-            fail(e && e.message ? e.message : 'request error');
-        }
-        return net;
-    }
-
-    function toBytes(value) {
-        if (typeof value === 'number' && isFinite(value)) return Math.max(0, Math.round(value));
-        var s = trim(value);
-        if (!s) return 0;
-        if (/^\d+$/.test(s)) return parseInt(s, 10);
-        var m = s.replace(',', '.').match(/([\d.]+)\s*(KiB|MiB|GiB|TiB|KB|MB|GB|TB|K|M|G|T|B|Б|КБ|МБ|ГБ|ТБ)?/i);
-        if (!m) return 0;
-        var n = parseFloat(m[1]);
-        if (isNaN(n)) return 0;
-        var u = (m[2] || 'B').toLowerCase();
-        var mult = 1;
-        if (u === 'k' || u === 'kb' || u === 'kib' || u === 'кб') mult = 1024;
-        else if (u === 'm' || u === 'mb' || u === 'mib' || u === 'мб') mult = 1048576;
-        else if (u === 'g' || u === 'gb' || u === 'gib' || u === 'гб') mult = 1073741824;
-        else if (u === 't' || u === 'tb' || u === 'tib' || u === 'тб') mult = 1099511627776;
-        return Math.round(n * mult);
-    }
-
-    function bytesText(bytes) {
-        if (!bytes) return '';
-        try { if (Lampa.Utils && Lampa.Utils.bytesToSize) return Lampa.Utils.bytesToSize(bytes); } catch (e) {}
-        var units = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'];
-        var i = Math.floor(Math.log(bytes) / Math.log(1024));
-        i = Math.max(0, Math.min(units.length - 1, i));
-        return (bytes / Math.pow(1024, i)).toFixed(i ? 2 : 0) + ' ' + units[i];
-    }
-
-    function toTime(value) {
-        if (typeof value === 'number' && isFinite(value)) return value < 1e12 ? value * 1000 : value;
-        var s = trim(value);
-        if (!s) return Date.now();
-        if (/^\d+$/.test(s)) {
-            var n = parseInt(s, 10);
-            return n < 1e12 ? n * 1000 : n;
-        }
-        var t = Date.parse(s);
-        return isNaN(t) ? Date.now() : t;
-    }
-
-    function hashText(text) {
-        try { if (Lampa.Utils && Lampa.Utils.hash) return String(Lampa.Utils.hash(text)); } catch (e) {}
-        var h = 0;
-        text = String(text || '');
-        for (var i = 0; i < text.length; i++) {
-            h = ((h << 5) - h) + text.charCodeAt(i);
-            h = h & h;
-        }
-        return String(Math.abs(h));
-    }
-
-    function magnetHash(magnet) {
-        var m = String(magnet || '').match(/btih:([a-zA-Z0-9]{32,40})/);
-        return m ? m[1].toLowerCase() : '';
-    }
-
-    function viewed(hash) {
-        try {
-            var list = Lampa.Storage.get('torrents_view', []);
-            if (typeof list === 'string') list = JSON.parse(list);
-            return list && list.indexOf && list.indexOf(hash) >= 0;
-        } catch (e) { return false; }
-    }
-
-    function normalizeImdb(raw) {
-        var s = trim(raw).toLowerCase();
-        if (!s) return '';
-        if (/^tt\d{7,10}$/.test(s)) return s;
-        if (/^\d{1,10}$/.test(s)) {
-            while (s.length < 7) s = '0' + s;
-            return 'tt' + s;
-        }
-        return '';
-    }
-
-    function clone(obj) {
-        var out = {};
-        if (!obj || typeof obj !== 'object') return out;
-        for (var k in obj) if (Object.prototype.hasOwnProperty.call(obj, k)) out[k] = obj[k];
-        return out;
-    }
-
-    function englishState(item) {
-        var i, lang;
-        var langs = item.languages || item.Languages || [];
-        if (typeof langs === 'string') langs = [langs];
-        for (i = 0; i < langs.length; i++) {
-            lang = String(langs[i] || '').toLowerCase();
-            if (lang === 'en' || lang === 'eng' || lang === 'english') return true;
-        }
-        var probe = item.ffprobe || [];
-        for (i = 0; i < probe.length; i++) {
-            if (probe[i] && probe[i].codec_type === 'audio' && probe[i].tags) {
-                lang = String(probe[i].tags.language || '').toLowerCase();
-                if (lang === 'en' || lang === 'eng') return true;
-            }
-        }
-        var title = String(item.Title || item.title || '');
-        if (/\b(english|eng)\b/i.test(title)) return true;
-        if (/\b(russian|rus|ukrainian|ukr|japanese|jpn|french|german|spanish)\b/i.test(title)) return false;
-        return null;
-    }
-
-    function normalizeItem(raw, source) {
-        if (!raw || typeof raw !== 'object') return null;
-        var item = clone(raw);
-        var title = trim(raw.Title || raw.title || raw.name || '');
-        if (!title) return null;
-
-        var magnet = raw.MagnetUri || raw.magnet || raw.magnetUri || '';
-        var link = raw.Link || raw.link || raw.downloadUrl || raw.torrent_url || '';
-        if (!magnet && /^magnet:/i.test(String(link))) magnet = link;
-        var ih = raw.infoHash || raw.infohash || raw.hash || '';
-        if (!magnet && ih && /^[a-zA-Z0-9]{32,40}$/.test(String(ih))) {
-            magnet = 'magnet:?xt=urn:btih:' + ih + '&dn=' + encodeURIComponent(title);
-        }
-        if (!magnet && !link) return null;
-
-        var tracker = trim(raw.Tracker || raw.tracker || raw.indexer || '');
-        item.Title = title;
-        item.Tracker = source.name + (tracker && tracker !== source.name ? ' / ' + tracker : '');
-        item.Size = toBytes(raw.Size != null ? raw.Size : raw.size);
-        item.size = item.Size ? bytesText(item.Size) : trim(raw.size || '');
-        item.Seeders = parseInt(raw.Seeders != null ? raw.Seeders : (raw.seeders != null ? raw.seeders : raw.seeds), 10) || 0;
-        item.Peers = parseInt(raw.Peers != null ? raw.Peers : (raw.leechers != null ? raw.leechers : raw.peers), 10) || 0;
-        item.MagnetUri = magnet;
-        item.Link = link || magnet;
-        item.PublishDate = toTime(raw.PublishDate || raw.publishDate || raw.CreateDate || raw.pubDate || raw.date);
-        item.PublisTime = item.PublishDate;
-        item.hash = magnetHash(magnet) || String(raw.hash || '') || hashText(title + '|' + item.Size + '|' + item.Tracker);
-        item.viewed = viewed(item.hash);
-        item.checked_at = Date.now();
-        item.source_rank = source.rank || 0;
-        item.en_sources_v2 = true;
-        item.en_source_name = source.name;
-        item.en_audio = englishState(item);
-        return item;
-    }
-
-    function cardKind(params) {
-        var movie = (params && params.movie) || {};
-        var tv = !!(movie.number_of_seasons || movie.original_name || movie.name || movie.first_air_date);
-        var genres = movie.genres || movie.genre_ids || [];
-        var animation = false;
-        for (var i = 0; i < genres.length; i++) {
-            var g = genres[i];
-            if ((typeof g === 'object' && g && g.id == 16) || g == 16) animation = true;
-        }
-        var anime = animation && (movie.original_language === 'ja' || movie.original_language === 'zh');
-        return { tv: tv, anime: anime, movie: !tv };
-    }
-
-    function allowedKinds(params) {
-        var kind = cardKind(params);
-        var out = [];
-        if (kind.movie && cfg.movies) out.push('movie');
-        if (kind.tv && cfg.tv) out.push('tv');
-        if (kind.anime && cfg.anime) out.push('anime');
-        return out;
-    }
-
-    function sourceMatches(src, kinds) {
-        if (!src.enabled) return false;
-        if (src.kind === 'all') return kinds.length > 0;
-        return kinds.indexOf(src.kind) >= 0;
-    }
-
-    function categoriesFor(src, kinds) {
-        var cats = [];
-        var want = src.kind === 'all' ? kinds : [src.kind];
-        for (var i = 0; i < want.length; i++) {
-            if (want[i] === 'movie' && cats.indexOf('2000') < 0) cats.push('2000');
-            if (want[i] === 'tv' && cats.indexOf('5000') < 0) cats.push('5000');
-            if (want[i] === 'anime' && cats.indexOf('5070') < 0) cats.push('5070');
-        }
-        return cats;
-    }
-
-    function queryFor(params) {
-        var movie = (params && params.movie) || {};
-        var q = movie.original_title || movie.original_name || params.search_two || params.search || movie.title || movie.name || '';
-        if (!q && params.query) {
-            try { q = decodeURIComponent(params.query); } catch (e) { q = params.query; }
-        }
-        return trim(q);
-    }
-
-    function yearFor(params) {
-        var movie = (params && params.movie) || {};
-        var d = movie.release_date || movie.first_air_date || movie.year || '';
-        var m = String(d).match(/(19|20)\d{2}/);
-        return m ? m[0] : '';
-    }
-
-    function episodeFor(params) {
-        var movie = (params && params.movie) || {};
-        var s = parseInt(movie.season_number, 10);
-        var e = parseInt(movie.episode_number, 10);
-        return { season: isNaN(s) ? 0 : s, episode: isNaN(e) ? 0 : e };
-    }
-
-    function parseXml(text) {
-        if (typeof window.DOMParser !== 'undefined') {
-            try {
-                var doc = new DOMParser().parseFromString(text, 'text/xml');
-                if (doc && doc.getElementsByTagName && !doc.getElementsByTagName('parsererror').length) return doc;
-            } catch (e) {}
-        }
-        if ($ && $.parseXML) {
-            try { return $.parseXML(text); } catch (e) {}
-        }
-        return null;
-    }
-
-    function xmlChildren(node, name) {
-        var out = [];
-        if (!node || !node.getElementsByTagName) return out;
-        var all = node.getElementsByTagName('*');
-        for (var i = 0; i < all.length; i++) {
-            var local = all[i].localName || String(all[i].nodeName || '').split(':').pop();
-            if (local === name) out.push(all[i]);
-        }
-        return out;
-    }
-
-    function xmlText(node, name) {
-        var nodes = xmlChildren(node, name);
-        if (!nodes.length) return '';
-        return trim(nodes[0].textContent || nodes[0].text || '');
-    }
-
-    function parseTorznab(text, source) {
-        var doc = parseXml(text);
-        if (!doc) throw new Error('XML parser unavailable');
-        var items = xmlChildren(doc, 'item');
-        var out = [];
-        for (var i = 0; i < items.length; i++) {
-            var it = items[i];
-            var raw = {
-                Title: xmlText(it, 'title'),
-                Link: xmlText(it, 'link'),
-                PublishDate: xmlText(it, 'pubDate'),
-                Tracker: source.name
-            };
-            var enclosure = null;
-            var enc = it.getElementsByTagName ? it.getElementsByTagName('enclosure') : [];
-            if (enc && enc.length) enclosure = enc[0];
-            if (enclosure && enclosure.getAttribute) raw.Link = enclosure.getAttribute('url') || raw.Link;
-            var attrs = xmlChildren(it, 'attr');
-            for (var j = 0; j < attrs.length; j++) {
-                var name = attrs[j].getAttribute ? String(attrs[j].getAttribute('name') || '').toLowerCase() : '';
-                var value = attrs[j].getAttribute ? attrs[j].getAttribute('value') : '';
-                if (name === 'size') raw.Size = value;
-                else if (name === 'seeders') raw.Seeders = value;
-                else if (name === 'peers') raw.Peers = value;
-                else if (name === 'infohash') raw.infoHash = value;
-                else if (name === 'magneturl') raw.MagnetUri = value;
-            }
-            var normalized = normalizeItem(raw, source);
-            if (normalized) out.push(normalized);
-        }
-        return out;
-    }
-
-    function parseJackett(json, source) {
-        var list = json && (json.Results || json.results);
-        if (!list || Object.prototype.toString.call(list) !== '[object Array]') throw new Error('Jackett: нет Results');
-        var out = [];
-        for (var i = 0; i < list.length; i++) {
-            var item = normalizeItem(list[i], source);
-            if (item) out.push(item);
-        }
-        return out;
-    }
-
-    function parseProwlarr(json, source) {
-        if (Object.prototype.toString.call(json) !== '[object Array]') throw new Error('Prowlarr: ожидался массив');
-        var out = [];
-        for (var i = 0; i < json.length; i++) {
-            var raw = json[i];
-            if (!raw || String(raw.protocol || '').toLowerCase() !== 'torrent') continue;
-            var item = normalizeItem({
-                Title: raw.title,
-                Tracker: raw.indexer,
-                Size: raw.size,
-                Seeders: raw.seeders,
-                Peers: raw.leechers,
-                PublishDate: raw.publishDate,
-                MagnetUri: /^magnet:/i.test(String(raw.downloadUrl || '')) ? raw.downloadUrl : '',
-                Link: raw.downloadUrl,
-                infoHash: raw.infoHash
-            }, source);
-            if (item) out.push(item);
-        }
-        return out;
-    }
-
-    function archiveSearch(source, params, done, fail, netBag) {
-        var q = queryFor(params);
-        if (!q) { done([]); return; }
-        var lucene = q.replace(/([+\-!(){}\[\]^"~*?:\\\/])/g, '\\$1');
-        var query = 'mediatype:(movies) AND title:(' + lucene + ')';
-        if (source.collections) query += ' AND collection:(' + source.collections.replace(/\s*,\s*/g, ' OR ') + ')';
-        var base = source.url || 'https://archive.org';
-        var url = addQuery(base + '/advancedsearch.php', [
-            { name: 'q', value: query },
-            { name: 'fl[]', value: 'identifier' },
-            { name: 'fl[]', value: 'title' },
-            { name: 'fl[]', value: 'year' },
-            { name: 'fl[]', value: 'downloads' },
-            { name: 'sort[]', value: 'downloads desc' },
-            { name: 'rows', value: '12' },
-            { name: 'page', value: '1' },
-            { name: 'output', value: 'json' }
-        ]);
-        var net = request(url, {}, function (json) {
-            var docs = json && json.response && json.response.docs;
-            if (!docs || !docs.length) { done([]); return; }
-            var out = [];
-            var index = 0;
-            var active = 0;
-            var finished = false;
-            var limit = Math.min(docs.length, 12);
-
-            function finish() {
-                if (finished) return;
-                finished = true;
-                done(out);
-            }
-
-            function next() {
-                if (finished) return;
-                if (index >= limit && active === 0) { finish(); return; }
-                while (active < 3 && index < limit) {
-                    var doc = docs[index++];
-                    active++;
-                    checkDoc(doc);
-                }
-            }
-
-            function checkDoc(doc) {
-                var id = trim(doc.identifier || '');
-                if (!id) { active--; next(); return; }
-                var metaUrl = base + '/metadata/' + encodeURIComponent(id);
-                var metaNet = request(metaUrl, {}, function (meta) {
-                    active--;
-                    try {
-                        if (!meta || meta.is_dark) { next(); return; }
-                        var files = meta.files || [];
-                        var torrent = null;
-                        for (var i = 0; i < files.length; i++) {
-                            var name = String(files[i].name || '');
-                            if (name === id + '_archive.torrent') { torrent = files[i]; break; }
-                            if (!torrent && /\.torrent$/i.test(name)) torrent = files[i];
-                        }
-                        if (torrent) {
-                            var lang = meta.metadata && (meta.metadata.language || meta.metadata.lang);
-                            var item = normalizeItem({
-                                Title: trim(doc.title || id) + (doc.year ? ' (' + doc.year + ')' : ''),
-                                Tracker: 'Internet Archive',
-                                Size: torrent.size,
-                                Link: base + '/download/' + encodeURIComponent(id) + '/' + encodeURIComponent(torrent.name),
-                                PublishDate: meta.metadata && (meta.metadata.publicdate || meta.metadata.addeddate),
-                                languages: lang ? [lang] : []
-                            }, source);
-                            if (item) out.push(item);
-                        }
-                    } catch (e) {}
-                    next();
-                }, function () {
-                    active--;
-                    next();
-                });
-                if (metaNet) netBag.push(metaNet);
-            }
-
-            next();
-        }, fail);
-        if (net) netBag.push(net);
-    }
-
-    function runSource(source, params, done, fail) {
-        var nets = [];
-        var called = false;
-        var timer = setTimeout(function () {
-            if (called) return;
-            called = true;
-            for (var i = 0; i < nets.length; i++) { try { nets[i].clear(); } catch (e) {} }
-            fail('timeout');
-        }, cfg.timeout * 1000 + 1500);
-
-        function ok(items) {
-            if (called) return;
-            called = true;
-            clearTimeout(timer);
-            done(items || []);
-        }
-
-        function bad(msg) {
-            if (called) return;
-            called = true;
-            clearTimeout(timer);
-            fail(msg || 'error');
-        }
-
-        try {
-            var q = queryFor(params);
-            var kinds = allowedKinds(params);
-            var cats = categoriesFor(source, kinds);
-            var ep = episodeFor(params);
-            var imdb = normalizeImdb(params.movie && params.movie.imdb_id);
-            var year = yearFor(params);
-            var url, headers = {};
-
-            if (source.type === 'archive') {
-                archiveSearch(source, params, ok, bad, nets);
-                return nets;
-            }
-
-            if (!q) { ok([]); return nets; }
-
-            if (source.type === 'jackett') {
-                url = source.url;
-                if (!/\/api\/v2\.0\/indexers\/.+\/results/i.test(url)) url += '/api/v2.0/indexers/all/results';
-                url = addQuery(url, [
-                    { name: 'apikey', value: source.key },
-                    { name: 'Query', value: q }
-                ]);
-                if (!params.from_search) {
-                    url = addQuery(url, [
-                        { name: 'title_original', value: q },
-                        { name: 'year', value: year },
-                        { name: 'is_serial', value: kinds.indexOf('tv') >= 0 || kinds.indexOf('anime') >= 0 ? '2' : '1' },
-                        { name: 'Category[]', value: cats.join(',') }
-                    ]);
-                }
-                var jn = request(url, {}, function (json) { ok(parseJackett(json, source)); }, bad);
-                if (jn) nets.push(jn);
-            } else if (source.type === 'prowlarr') {
-                url = source.url;
-                if (!/\/api\/v1\/search/i.test(url)) url += '/api/v1/search';
-                var tvq = q;
-                if ((kinds.indexOf('tv') >= 0 || kinds.indexOf('anime') >= 0) && imdb) {
-                    tvq = '{ImdbId:' + imdb + '}';
-                    if (ep.season) tvq += ' {Season:' + ep.season + '}';
-                    if (ep.episode) tvq += ' {Episode:' + ep.episode + '}';
-                }
-                url = addQuery(url, [
-                    { name: 'query', value: tvq },
-                    { name: 'type', value: kinds.indexOf('tv') >= 0 || kinds.indexOf('anime') >= 0 ? 'tvsearch' : 'search' },
-                    { name: 'indexerIds', value: '-2' }
-                ]);
-                for (var c = 0; c < cats.length; c++) url = addQuery(url, [{ name: 'categories', value: cats[c] }]);
-                if (source.key) headers['X-Api-Key'] = source.key;
-                var pn = request(url, { headers: headers }, function (json) { ok(parseProwlarr(json, source)); }, bad);
-                if (pn) nets.push(pn);
-            } else {
-                url = source.url;
-                var t = kinds.indexOf('tv') >= 0 || kinds.indexOf('anime') >= 0 ? 'tvsearch' : (kinds.indexOf('movie') >= 0 ? 'movie' : 'search');
-                url = addQuery(url, [
-                    { name: 't', value: t },
-                    { name: 'q', value: q },
-                    { name: 'apikey', value: source.key },
-                    { name: 'cat', value: cats.join(',') },
-                    { name: 'imdbid', value: imdb },
-                    { name: 'season', value: ep.season || '' },
-                    { name: 'ep', value: ep.episode || '' },
-                    { name: 'limit', value: '100' }
-                ]);
-                var tn = request(url, { text: true }, function (text) { ok(parseTorznab(text, source)); }, bad);
-                if (tn) nets.push(tn);
-            }
-        } catch (e) {
-            bad(e && e.message ? e.message : 'source error');
-        }
-        return nets;
-    }
-
-    function dedupe(items) {
-        var seen = {};
-        var out = [];
-        for (var i = 0; i < items.length; i++) {
-            var item = items[i];
-            var key = item.hash || item.MagnetUri || item.Link || (item.Title + '|' + item.Size);
-            if (!seen[key]) {
-                seen[key] = true;
-                out.push(item);
-            }
-        }
-        return out;
-    }
-
-    function applyAudio(items) {
-        var out = [];
-        for (var i = 0; i < items.length; i++) {
-            var st = items[i].en_audio;
-            if (cfg.audio === 'strict' && st !== true) continue;
-            out.push(items[i]);
-        }
-        if (cfg.audio === 'prefer') {
-            out.sort(function (a, b) {
-                var ra = a.en_audio === true ? 0 : (a.en_audio === null ? 1 : 2);
-                var rb = b.en_audio === true ? 0 : (b.en_audio === null ? 1 : 2);
-                if (ra !== rb) return ra - rb;
-                return (b.Seeders || 0) - (a.Seeders || 0);
-            });
-        }
-        return out;
-    }
-
-    function cardKey(params) {
-        var movie = (params && params.movie) || {};
-        return String(movie.id || '') + ':' + (movie.number_of_seasons || movie.original_name ? 'tv' : 'movie') + ':' + queryFor(params);
-    }
-
-    function runExternal(params, callback, force) {
-        readConfig();
-        var kinds = allowedKinds(params);
-        var active = [];
-        for (var i = 0; i < sources.length; i++) {
-            if (force ? sources[i].enabled : sourceMatches(sources[i], kinds)) active.push(sources[i]);
-        }
-        var id = ++state.searchSeq;
-        var search = { id: id, canceled: false, nets: [], timer: null, pending: active.length, items: [], errors: [], done: false };
-        state.searches[id] = search;
-
-        function finish() {
-            if (search.done || search.canceled) return;
-            search.done = true;
-            clearTimeout(search.timer);
-            delete state.searches[id];
-            var items = applyAudio(dedupe(search.items));
-            state.last = {
-                time: Date.now(),
-                query: queryFor(params),
-                found: items.length,
-                errors: search.errors.slice(),
-                sources: active.length
-            };
-            callback({ Results: items, errors: search.errors });
-        }
-
-        search.timer = setTimeout(finish, cfg.timeout * 1000 + 3000);
-
-        if (!active.length) {
-            search.errors.push('Нет активных источников для этой категории');
-            finish();
-            return id;
-        }
-
-        for (var j = 0; j < active.length; j++) {
-            (function (source) {
-                var nets = runSource(source, params, function (items) {
-                    search.items = search.items.concat(items || []);
-                    search.pending--;
-                    if (search.pending <= 0) finish();
-                }, function (msg) {
-                    search.errors.push(source.name + ': ' + msg);
-                    search.pending--;
-                    if (search.pending <= 0) finish();
-                });
-                if (nets && nets.length) search.nets = search.nets.concat(nets);
-            })(active[j]);
-        }
-        return id;
-    }
-
-    function cancelSearches() {
-        for (var id in state.searches) {
-            if (!Object.prototype.hasOwnProperty.call(state.searches, id)) continue;
-            var s = state.searches[id];
-            s.canceled = true;
-            clearTimeout(s.timer);
-            for (var i = 0; i < s.nets.length; i++) { try { s.nets[i].clear(); } catch (e) {} }
-        }
-        state.searches = {};
-    }
-
-    function follow(target, event, fn) {
-        if (!target || !target.follow) return;
-        target.follow(event, fn);
-        state.listeners.push({ target: target, event: event, fn: fn });
-    }
-
-    function removeListeners() {
-        for (var i = 0; i < state.listeners.length; i++) {
-            var l = state.listeners[i];
-            try { if (l.target.remove) l.target.remove(l.event, l.fn); } catch (e) {}
-        }
-        state.listeners = [];
+    function notify(text) {
+        try { if (Lampa.Noty) Lampa.Noty.show(text, { time: 4500 }); } catch (e) {}
     }
 
     function coreVersion() {
@@ -845,83 +199,1160 @@
         return 'не определена';
     }
 
-    function neutralizeOldVersion() {
+    function isAndroid() {
         try {
-            if (Lampa.Parser && Lampa.Parser._en_sources_hooked && !Lampa.Parser.__en_sources_v2) {
-                Lampa.Storage.set('en_sources_enabled', 'false');
-                warn('Обнаружена старая версия 1.0.x. Она отключена; перезапустите Lampa, чтобы убрать её пункты настроек.');
+            if (window.AndroidJS && Lampa.Platform && Lampa.Platform.is) {
+                return !!Lampa.Platform.is('android');
             }
         } catch (e) {}
+        return false;
     }
+
+    function normalizeImdb(raw) {
+        var s = clean(raw).toLowerCase();
+        if (!s) return '';
+        if (/^tt\d{7,10}$/.test(s)) return s;
+        if (/^\d{1,10}$/.test(s)) {
+            while (s.length < 7) s = '0' + s;
+            return 'tt' + s;
+        }
+        return '';
+    }
+
+    function parseSize(value) {
+        if (typeof value === 'number' && isFinite(value)) return Math.max(0, Math.round(value));
+        var s = clean(value).replace(',', '.');
+        if (!s) return 0;
+        if (/^\d+$/.test(s)) return parseInt(s, 10);
+        var m = s.match(/([\d.]+)\s*(K|M|G|T|К|М|Г|Т)?i?[BБ]/i);
+        if (!m) return 0;
+        var n = parseFloat(m[1]);
+        if (isNaN(n)) return 0;
+        var u = (m[2] || '').toLowerCase();
+        var mult = 1;
+        if (u === 'k' || u === 'к') mult = 1024;
+        else if (u === 'm' || u === 'м') mult = 1048576;
+        else if (u === 'g' || u === 'г') mult = 1073741824;
+        else if (u === 't' || u === 'т') mult = 1099511627776;
+        return Math.round(n * mult);
+    }
+
+    function bytesText(bytes) {
+        if (!bytes) return '';
+        try {
+            if (Lampa.Utils && Lampa.Utils.bytesToSize) return Lampa.Utils.bytesToSize(bytes);
+        } catch (e) {}
+        var units = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'];
+        var i = Math.floor(Math.log(bytes) / Math.log(1024));
+        i = Math.max(0, Math.min(units.length - 1, i));
+        return (bytes / Math.pow(1024, i)).toFixed(i ? 2 : 0) + ' ' + units[i];
+    }
+
+    function parseTime(value) {
+        if (typeof value === 'number' && isFinite(value)) {
+            return value < 1e12 ? value * 1000 : value;
+        }
+        var s = clean(value);
+        if (!s) return Date.now();
+        if (/^\d+$/.test(s)) {
+            var n = parseInt(s, 10);
+            return n < 1e12 ? n * 1000 : n;
+        }
+        var t = Date.parse(s.replace(/\s-0000$/, ' GMT'));
+        if (!isNaN(t)) return t;
+        var m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+        if (m) return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6] || 0);
+        var t2 = Date.parse(s);
+        return isNaN(t2) ? Date.now() : t2;
+    }
+
+    function viewed(hash) {
+        try {
+            var list = Lampa.Storage.cache('torrents_view', 5000, []);
+            return !!(list && list.indexOf && list.indexOf(hash) >= 0);
+        } catch (e) { return false; }
+    }
+
+    function magnetFor(hash, title) {
+        var trackers = [
+            'http://nyaa.tracker.wf:7777/announce',
+            'udp://open.stealth.si:80/announce',
+            'udp://tracker.opentrackr.org:1337/announce',
+            'udp://exodus.desync.com:6969/announce',
+            'udp://tracker.torrent.eu.org:451/announce'
+        ];
+        var url = 'magnet:?xt=urn:btih:' + hash + '&dn=' + encodeURIComponent(title || '');
+        for (var i = 0; i < trackers.length; i++) url += '&tr=' + encodeURIComponent(trackers[i]);
+        return url;
+    }
+
+    function decodeXml(value) {
+        return String(value == null ? '' : value)
+            .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+            .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+            .replace(/&apos;/g, "'").replace(/&amp;/g, '&')
+            .replace(/&#x([0-9a-f]+);/gi, function (m, hex) {
+                try { return String.fromCharCode(parseInt(hex, 16)); } catch (e) { return m; }
+            })
+            .replace(/&#(\d+);/g, function (m, num) {
+                try { return String.fromCharCode(parseInt(num, 10)); } catch (e) { return m; }
+            });
+    }
+
+    function isCloudflare(text) {
+        return /just a moment|cf-browser-verification|enable javascript and cookies|attention required/i
+            .test(String(text || '').slice(0, 3000));
+    }
+
+    function looksJson(text) {
+        var s = String(text || '').replace(/^\uFEFF/, '').replace(/^\s+/, '');
+        return s.charAt(0) === '{' || s.charAt(0) === '[';
+    }
+
+    function looksNyaaRss(text) {
+        return /<rss[\s>]|<item[\s>]/i.test(String(text || ''));
+    }
+
+    function looksNyaaHtml(text) {
+        var s = String(text || '');
+        return /torrent-list/i.test(s) || /magnet:\?xt=urn:btih:/i.test(s);
+    }
+
+    function isRuAudio(t) {
+        return RU_AUDIO_RE.test(String(t || ''));
+    }
+
+    function audioState(t) {
+        t = String(t || '');
+        if (isRuAudio(t)) return false;
+        if (DUB_RE.test(t) || EN_SUB_RE.test(t)) return true;
+        return null;
+    }
+
+    function isAnimeCard(object) {
+        if (!object) return false;
+        if (object.search_two) return true;
+        var movie = object.movie || {};
+        var genres = movie.genres || [];
+        var animation = false;
+        for (var i = 0; i < genres.length; i++) {
+            var g = genres[i];
+            if ((g && typeof g === 'object' && g.id == 16) || g == 16) animation = true;
+        }
+        var lang = String(movie.original_language || '').toLowerCase();
+        if (animation && (lang === 'ja' || lang === 'zh')) return true;
+        if (CJK_RE.test(movie.original_name) || CJK_RE.test(movie.original_title)) return true;
+        if (CJK_RE.test(object.search)) return true;
+        return false;
+    }
+
+    function queryFor(object) {
+        object = object || {};
+        var movie = object.movie || {};
+        var q = object.search_two || movie.original_title || movie.original_name ||
+            movie.title || movie.name || object.search || '';
+        if (!q && object.query) {
+            try { q = decodeURIComponent(object.query); } catch (e) { q = object.query; }
+        }
+        return cleanQuery(q);
+    }
+
+    function cleanQuery(value) {
+        var s = clean(value);
+        s = s.replace(/\s+\((?:TV|Movie|OVA|ONA|Special)\)\s*$/i, '');
+        s = s.replace(/\s+\((?:19|20)\d{2}\)\s*$/, '');
+        s = s.replace(/\s+\[(?:19|20)\d{2}\]\s*$/, '');
+        s = s.replace(/^[\-–—:;,. ]+|[\-–—:;,. ]+$/g, '');
+        return clean(s);
+    }
+
+    function pushQuery(list, value) {
+        var q = cleanQuery(value);
+        if (!q || q.length < 2) return;
+        var key = q.toLowerCase();
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].toLowerCase() === key) return;
+        }
+        list.push(q);
+    }
+
+    function queryScore(q) {
+        if (CJK_RE.test(q)) return 1;
+        if (/[А-Яа-яЁё]/.test(q)) return 2;
+        return 0;
+    }
+
+    function baseQueries(object) {
+        object = object || {};
+        var movie = object.movie || {};
+        var out = [];
+        pushQuery(out, object.search_two);
+        pushQuery(out, movie.original_title);
+        pushQuery(out, movie.original_name);
+        pushQuery(out, movie.title);
+        pushQuery(out, movie.name);
+        pushQuery(out, object.search);
+        return out;
+    }
+
+    function cardKey(object) {
+        var movie = (object && object.movie) || {};
+        return String(movie.id || '') + ':' +
+            (movie.number_of_seasons || movie.original_name || movie.name ? 'tv' : 'movie');
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* HTTP (прямые запросы, без прокси)                                   */
+    /* ------------------------------------------------------------------ */
+
+    function requestText(url, callback, bag, validator) {
+        var net;
+        try { net = new Lampa.Reguest(); } catch (e) { callback('Reguest недоступен'); return; }
+        try { net.timeout(cfg.timeout * 1000); } catch (e) {}
+
+        var params = {
+            dataType: 'text',
+            headers: { 'Accept': 'text/xml,application/xml,text/html,*/*' }
+        };
+        if (isAndroid()) {
+            params.headers['User-Agent'] = UA;
+            params.headers['Accept-Language'] = 'en-US,en;q=0.9,ru;q=0.8';
+        }
+
+        var settled = false;
+        function ok(text) {
+            if (settled) return;
+            settled = true;
+            if (isCloudflare(text) || (validator && !validator(text))) {
+                callback('Cloudflare / неожиданный ответ');
+                return;
+            }
+            callback(null, text);
+        }
+        function fail(a, b) {
+            if (settled) return;
+            settled = true;
+            var msg = 'сеть';
+            try { msg = net.errorDecode(a, b) || msg; } catch (e) {}
+            callback(msg);
+        }
+
+        try {
+            net.native(url, ok, fail, false, params);
+        } catch (e) {
+            fail({ message: e && e.message ? e.message : 'request error' }, '');
+            return;
+        }
+        if (bag) bag.push(net);
+    }
+
+    function requestJson(url, callback, bag) {
+        requestText(url, function (err, text) {
+            if (err) { callback(err); return; }
+            try {
+                callback(null, JSON.parse(String(text || '').replace(/^\uFEFF/, '')));
+            } catch (e) {
+                callback('JSON: ' + (e && e.message ? e.message : 'parse error'));
+            }
+        }, bag, looksJson);
+    }
+
+    function postJson(url, body, callback) {
+        var net;
+        try { net = new Lampa.Reguest(); } catch (e) { callback('Reguest недоступен'); return; }
+        try { net.timeout(12000); } catch (e) {}
+
+        var headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
+        if (isAndroid()) headers['User-Agent'] = UA;
+
+        var settled = false;
+        function ok(j) {
+            if (settled) return;
+            settled = true;
+            callback(null, j);
+        }
+        function fail(a, b) {
+            if (settled) return;
+            settled = true;
+            var msg = 'сеть';
+            try { msg = net.errorDecode(a, b) || msg; } catch (e) {}
+            callback(msg);
+        }
+
+        try {
+            net.native(url, ok, fail, body, { dataType: 'json', headers: headers });
+        } catch (e) {
+            fail({ message: e && e.message ? e.message : 'request error' }, '');
+        }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Названия аниме: Shikimori -> AniList                                */
+    /* ------------------------------------------------------------------ */
+
+    function shikimoriTitles(query, callback) {
+        requestJson('https://shikimori.io/api/animes?search=' +
+            encodeURIComponent(query) + '&limit=5', function (err, json) {
+            var out = [];
+            if (err || !json || Object.prototype.toString.call(json) !== '[object Array]') {
+                callback(out);
+                return;
+            }
+            for (var i = 0; i < json.length; i++) {
+                var a = json[i] || {};
+                if (a.name) out.push(a.name);
+                if (a.english) out.push(a.english);
+            }
+            callback(out);
+        });
+    }
+
+    function anilistTitles(query, callback) {
+        var body = JSON.stringify({
+            query: 'query($s:String){Page(perPage:3){media(search:$s,type:ANIME){' +
+                'title{romaji english} synonyms}}}',
+            variables: { s: query }
+        });
+        postJson('https://graphql.anilist.co', body, function (err, json) {
+            var out = [];
+            if (err || !json) { callback(out); return; }
+            try {
+                var media = json.data.Page.media || [];
+                for (var i = 0; i < media.length; i++) {
+                    var t = media[i].title || {};
+                    if (t.romaji) out.push(t.romaji);
+                    if (t.english) out.push(t.english);
+                    var syn = media[i].synonyms || [];
+                    for (var k = 0; k < syn.length; k++) out.push(syn[k]);
+                }
+            } catch (e) {}
+            callback(out);
+        });
+    }
+
+    function resolveTitles(base, callback) {
+        if (!base.length) { callback([]); return; }
+        var key = base.join('|').toLowerCase();
+        var cached = resolveCache[key];
+        if (cached && Date.now() - cached.time < (cached.titles.length ? 3600000 : 300000)) {
+            callback(cached.titles);
+            return;
+        }
+
+        var finished = false;
+        var timer = setTimeout(function () {
+            if (finished) return;
+            finished = true;
+            callback([]);
+        }, 8500);
+
+        function finish(titles) {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            var out = [];
+            for (var i = 0; i < titles.length; i++) pushQuery(out, titles[i]);
+            resolveCache[key] = { time: Date.now(), titles: out };
+            callback(out);
+        }
+
+        shikimoriTitles(base[0], function (titles) {
+            if (titles && titles.length) { finish(titles); return; }
+            anilistTitles(base[0], function (more) { finish(more || []); });
+        });
+    }
+
+    function buildQueries(object, callback) {
+        var base = baseQueries(object);
+        if (!isAnimeCard(object) || !base.length) {
+            var list = base.slice().sort(function (a, b) { return queryScore(a) - queryScore(b); });
+            callback(list.length ? list : [queryFor(object)]);
+            return;
+        }
+
+        resolveTitles(base, function (titles) {
+            var out = [];
+            if (base.length) pushQuery(out, base[0]);
+            for (var i = 0; i < titles.length; i++) pushQuery(out, titles[i]);
+            for (var j = 1; j < base.length; j++) pushQuery(out, base[j]);
+            out = out.slice(0, 6).sort(function (a, b) { return queryScore(a) - queryScore(b); });
+            callback(out.length ? out : [queryFor(object)]);
+        });
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Сборка элементов результата                                         */
+    /* ------------------------------------------------------------------ */
+
+    function makeItem(o) {
+        var hash = String(o.hash || '').toLowerCase();
+        if (!/^[a-f0-9]{40}$/.test(hash)) {
+            var hm = String(o.magnet || '').match(/btih:([a-fA-F0-9]{40})/i);
+            hash = hm ? hm[1].toLowerCase() : '';
+        }
+        var size = typeof o.size === 'number' ? o.size : parseSize(o.size);
+        var date = parseTime(o.date);
+        var title = clean(o.title);
+        if (!title) title = 'Unknown';
+        var magnet = o.magnet || (hash ? magnetFor(hash, title) : '');
+
+        return {
+            Title: title,
+            Tracker: o.tracker || 'EN',
+            Seeders: int(o.seeds, 0),
+            Peers: int(o.peers, 0),
+            Size: size,
+            size: bytesText(size),
+            MagnetUri: magnet,
+            Link: o.link || magnet || '',
+            PublishDate: date,
+            PublisTime: date,
+            hash: hash || magnet || title,
+            viewed: hash ? viewed(hash) : false,
+            checked_at: Date.now(),
+            en_audio: audioState(title),
+            en_dub: DUB_RE.test(title),
+            en_public: true,
+            en_sources_v3: true,
+            en_source_name: o.tracker || 'EN'
+        };
+    }
+
+    function dedupeItems(items) {
+        var map = {};
+        var out = [];
+        for (var i = 0; i < items.length; i++) {
+            var item = items[i];
+            if (!item) continue;
+            var key = item.hash ? 'h:' + String(item.hash).toLowerCase()
+                : (item.MagnetUri || item.Link || (item.Title + '|' + item.Size));
+            var prev = map[key];
+            if (!prev) {
+                map[key] = item;
+                out.push(item);
+            } else if ((item.Seeders || 0) > (prev.Seeders || 0)) {
+                var index = out.indexOf(prev);
+                if (index >= 0) out[index] = item;
+                map[key] = item;
+            }
+        }
+        return out;
+    }
+
+    function compareForeign(a, b) {
+        if (cfg.prefer_en) {
+            var ea = a.en_audio === true ? 0 : 1;
+            var eb = b.en_audio === true ? 0 : 1;
+            if (ea !== eb) return ea - eb;
+        }
+        return (b.Seeders || 0) - (a.Seeders || 0);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Nyaa                                                                */
+    /* ------------------------------------------------------------------ */
+
+    function xmlText(node, name) {
+        var all = node.getElementsByTagName('*');
+        for (var i = 0; i < all.length; i++) {
+            var local = all[i].localName || String(all[i].nodeName || '').split(':').pop();
+            if (String(local).toLowerCase() === name.toLowerCase()) {
+                return clean(all[i].textContent || all[i].text || '');
+            }
+        }
+        return '';
+    }
+
+    function textOf(el) {
+        return clean(el ? (el.textContent != null ? el.textContent : el.innerText) : '');
+    }
+
+    function nyaaRssUrl(q, cat) {
+        return 'https://nyaa.si/?page=rss&c=' + cat + '&f=0&s=seeders&o=desc&q=' + encodeURIComponent(q);
+    }
+
+    function nyaaHtmlUrl(q, cat, page) {
+        return 'https://nyaa.si/?f=0&c=' + cat + '&q=' + encodeURIComponent(q) +
+            '&s=seeders&o=desc&p=' + page;
+    }
+
+    function parseNyaaDom(text) {
+        if (typeof window.DOMParser === 'undefined') return null;
+        var doc;
+        try { doc = new window.DOMParser().parseFromString(text, 'text/xml'); } catch (e) { return null; }
+        if (!doc || !doc.getElementsByTagName) return null;
+        if (doc.getElementsByTagName('parsererror').length) return null;
+        var nodes = doc.getElementsByTagName('item');
+        if (!nodes || !nodes.length) return null;
+
+        var out = [];
+        for (var i = 0; i < nodes.length; i++) {
+            var guid = xmlText(nodes[i], 'guid');
+            var idm = guid.match(/\/view\/(\d+)/);
+            var item = makeItem({
+                title: xmlText(nodes[i], 'title'),
+                hash: xmlText(nodes[i], 'infoHash'),
+                seeds: xmlText(nodes[i], 'seeders'),
+                peers: xmlText(nodes[i], 'leechers'),
+                size: xmlText(nodes[i], 'size'),
+                date: xmlText(nodes[i], 'pubDate'),
+                tracker: 'Nyaa',
+                link: idm ? ('https://nyaa.si/download/' + idm[1] + '.torrent') : ''
+            });
+            if (item) out.push(item);
+        }
+        return out.length ? out : null;
+    }
+
+    function parseNyaaRegex(text) {
+        var out = [];
+        var items = String(text || '').match(/<item\b[\s\S]*?<\/item>/gi);
+        if (!items) return out;
+
+        function tag(block, name) {
+            var re = new RegExp('<' + name + '\\b[^>]*>([\\s\\S]*?)<\\/' + name + '>', 'i');
+            var m = block.match(re);
+            if (!m) {
+                re = new RegExp('<[\\w.-]+:' + name + '\\b[^>]*>([\\s\\S]*?)<\\/[\\w.-]+:' + name + '>', 'i');
+                m = block.match(re);
+            }
+            return m ? decodeXml(m[1]) : '';
+        }
+
+        for (var i = 0; i < items.length; i++) {
+            var block = items[i];
+            var guid = tag(block, 'guid');
+            var idm = guid.match(/\/view\/(\d+)/);
+            var item = makeItem({
+                title: tag(block, 'title'),
+                hash: tag(block, 'infoHash'),
+                seeds: tag(block, 'seeders'),
+                peers: tag(block, 'leechers'),
+                size: tag(block, 'size'),
+                date: tag(block, 'pubDate'),
+                tracker: 'Nyaa',
+                link: idm ? ('https://nyaa.si/download/' + idm[1] + '.torrent') : ''
+            });
+            if (item) out.push(item);
+        }
+        return out;
+    }
+
+    function parseNyaa(text) {
+        if (!text) return [];
+        var out = null;
+        try { out = parseNyaaDom(text); } catch (e) {}
+        if (!out || !out.length) out = parseNyaaRegex(text);
+        return out || [];
+    }
+
+    /*
+     * HTML-парсер Nyaa (без querySelector — совместим со старыми WebView).
+     * Структура строки таблицы: [0]category [1]name(+comments) [2]link
+     * [3]size [4]date [5]seeders [6]leechers [7]downloads.
+     */
+    function parseNyaaHtml(text) {
+        var out = [];
+        if (!text || typeof window.DOMParser === 'undefined') return out;
+        var doc;
+        try { doc = new window.DOMParser().parseFromString(text, 'text/html'); } catch (e) { return out; }
+        if (!doc || !doc.getElementsByTagName) return out;
+
+        var rows = doc.getElementsByTagName('tr');
+        for (var i = 0; i < rows.length; i++) {
+            var cells = rows[i].getElementsByTagName('td');
+            if (!cells || cells.length < 7) continue;
+
+            // название + id: берём ссылку /view/ID без #comments
+            var links = cells[1].getElementsByTagName('a');
+            var viewLink = null;
+            for (var j = 0; j < links.length; j++) {
+                var href = links[j].getAttribute('href') || '';
+                if (/\/view\/\d+$/.test(href)) { viewLink = links[j]; break; }
+            }
+            if (!viewLink) {
+                for (var k = 0; k < links.length; k++) {
+                    var h2 = links[k].getAttribute('href') || '';
+                    if (h2.indexOf('/view/') >= 0) { viewLink = links[k]; }
+                }
+            }
+            var title = '';
+            var id = '';
+            if (viewLink) {
+                title = clean(viewLink.getAttribute('title') || viewLink.textContent || '');
+                var idm = (viewLink.getAttribute('href') || '').match(/\/view\/(\d+)/);
+                if (idm) id = idm[1];
+            }
+
+            var magnet = '';
+            var magLinks = cells[2].getElementsByTagName('a');
+            for (var m = 0; m < magLinks.length; m++) {
+                var mhref = magLinks[m].getAttribute('href') || '';
+                if (mhref.indexOf('magnet:') === 0) { magnet = mhref; break; }
+            }
+            if (!magnet) continue;
+
+            var hm = magnet.match(/btih:([a-zA-Z0-9]{32,40})/);
+            if (!title || !hm) continue;
+
+            var ts = cells[4].getAttribute ? cells[4].getAttribute('data-timestamp') : '';
+            var date = ts ? (parseInt(ts, 10) * 1000) : textOf(cells[4]);
+
+            var item = makeItem({
+                title: title,
+                hash: hm[1],
+                seeds: textOf(cells[5]),
+                peers: textOf(cells[6]),
+                size: textOf(cells[3]),
+                date: date,
+                tracker: 'Nyaa',
+                link: id ? ('https://nyaa.si/download/' + id + '.torrent') : ''
+            });
+            if (item) { item.MagnetUri = magnet; out.push(item); }
+        }
+        return out;
+    }
+
+    function nyaaSearch(object, queries, done, bag) {
+        var movie = object.movie || {};
+        var anime = isAnimeCard(object);
+        var isSeries = !!(movie.number_of_seasons || movie.original_name || movie.name || movie.first_air_date);
+        var season = int(movie.season_number, 0);
+        var cat = anime ? '1_2' : '4_1';
+        var q0 = queries[0] || queryFor(object);
+        if (!q0) { done([], []); return; }
+
+        var qlist = [q0];
+        if (isSeries && season > 0) {
+            var sn = ('0' + season).slice(-2);
+            qlist.push(q0 + ' S' + sn);
+            qlist.push(q0 + ' season ' + season);
+        }
+        if (isSeries) qlist.push(q0 + ' batch');
+
+        var seen = {};
+        var unique = [];
+        for (var q = 0; q < qlist.length; q++) {
+            var key = qlist[q].toLowerCase();
+            if (!seen[key] && unique.length < 4) { seen[key] = true; unique.push(qlist[q]); }
+        }
+
+        var all = [];
+        var errors = [];
+        var remaining = unique.length;
+        var finished = false;
+
+        function finishOnce() {
+            if (finished) return;
+            finished = true;
+            done(dedupeItems(all), errors);
+        }
+
+        function onQuery(items, err) {
+            if (err) errors.push(err);
+            if (items && items.length) all = all.concat(items);
+            remaining--;
+            if (remaining <= 0) finishOnce();
+        }
+
+        // RSS у Nyaa всегда отдаёт новинки (s=seeders игнорируется), поэтому
+        // для «популярных первыми» основной — HTML с s=seeders; RSS — запасной.
+        function runRss(query) {
+            requestText(nyaaRssUrl(query, cat), function (err, text) {
+                if (err) { onQuery([], 'Nyaa «' + query + '»: ' + err); return; }
+                onQuery(parseNyaa(text));
+            }, bag, looksNyaaRss);
+        }
+
+        for (var i = 0; i < unique.length; i++) {
+            (function (query) {
+                requestText(nyaaHtmlUrl(query, cat, 1), function (err, html) {
+                    if (err) { runRss(query); return; }
+                    var found = parseNyaaHtml(html);
+                    if (found.length) { onQuery(found); return; }
+                    runRss(query);
+                }, bag, looksNyaaHtml);
+            })(unique[i]);
+        }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Прочие источники                                                    */
+    /* ------------------------------------------------------------------ */
+
+    function anidexSearch(object, queries, done, bag) {
+        var q = queries[0] || queryFor(object);
+        if (!q) { done([], []); return; }
+        requestJson('https://anidex.info/api/?q=' + encodeURIComponent(q) + '&s=seeders&o=desc',
+            function (err, json) {
+                if (err) { done([], [err]); return; }
+                var list = json && (json.length ? json : (json.torrents || null));
+                if (!list || Object.prototype.toString.call(list) !== '[object Array]') { done([], []); return; }
+                var out = [];
+                for (var i = 0; i < list.length; i++) {
+                    var t = list[i] || {};
+                    if (!t || !t.magnet) continue;
+                    out.push(makeItem({
+                        title: t.torrent_name || t.name,
+                        tracker: 'AniDex' + (t.lang_name ? ' (' + t.lang_name + ')' : ''),
+                        seeds: t.seeded, peers: t.leechers,
+                        size: parseSize(t.size), date: t.date_uploaded || '',
+                        hash: t.hash, magnet: t.magnet, link: ''
+                    }));
+                }
+                done(out, []);
+            }, bag);
+    }
+
+    function parseTorrentio(json) {
+        var out = [];
+        var streams = json && json.streams ? json.streams : [];
+        for (var i = 0; i < streams.length; i++) {
+            var s = streams[i] || {};
+            var hash = String(s.infoHash || '').toLowerCase();
+            if (!/^[a-f0-9]{40}$/.test(hash)) continue;
+            var name = clean(String(s.name || '').replace(/\n/g, ' '));
+            var info = String(s.title || '').replace(/\n/g, ' ');
+            var seeds = info.match(/👤\s*([\d.,]+)/) || info.match(/seeds?\s*:?\s*([\d.,]+)/i);
+            var size = info.match(/💾\s*([\d.,]+\s*[KMGT]?B)/i);
+            var src = info.match(/⚙️\s*([^\n]+)/);
+            var tracker = src ? clean(src[1]) : 'Torrentio';
+            var title = clean((name || 'Torrentio') + ' — ' + tracker + ' [Torrentio]');
+            out.push(makeItem({
+                title: title, tracker: tracker,
+                seeds: seeds ? int(String(seeds[1]).replace(/[^\d]/g, ''), 0) : 0,
+                peers: 0, size: size ? size[1] : '',
+                hash: hash,
+                magnet: 'magnet:?xt=urn:btih:' + hash +
+                    (s.fileIdx != null ? '&so=' + s.fileIdx : '') +
+                    '&dn=' + encodeURIComponent(title),
+                link: ''
+            }));
+        }
+        return out;
+    }
+
+    function torrentioSearch(object, done, bag) {
+        var movie = object.movie || {};
+        var imdb = normalizeImdb(movie.imdb_id);
+        if (!imdb) { done([], []); return; }
+        var isSeries = !!movie.number_of_seasons;
+        var season = int(movie.season_number, 0);
+        var episode = int(movie.episode_number, 0);
+        if (isSeries && !episode) { done([], []); return; }
+        var path = isSeries
+            ? 'series/' + imdb + ':' + (season || 1) + ':' + episode
+            : 'movie/' + imdb;
+        requestJson('https://torrentio.strem.fun/stream/' + path + '.json',
+            function (err, json) {
+                if (err) { done([], [err]); return; }
+                done(parseTorrentio(json), []);
+            }, bag);
+    }
+
+    function parseYts(json) {
+        var out = [];
+        var movies = json && json.data && json.data.movies ? json.data.movies : [];
+        for (var i = 0; i < movies.length; i++) {
+            var m = movies[i] || {};
+            var torrents = m.torrents || [];
+            for (var j = 0; j < torrents.length; j++) {
+                var t = torrents[j] || {};
+                var hash = String(t.hash || '').toLowerCase();
+                if (!/^[a-f0-9]{40}$/.test(hash)) continue;
+                var title = clean(m.title + ' (' + m.year + ') [' + (t.quality || '?') +
+                    '] [' + (t.type || '?') + '] [YTS]');
+                out.push(makeItem({
+                    title: title, tracker: 'YTS',
+                    seeds: t.seeds, peers: t.peers,
+                    size: t.size, date: t.date_uploaded || '',
+                    hash: hash,
+                    magnet: /^magnet:/i.test(String(t.url || '')) ? t.url : '',
+                    link: ''
+                }));
+            }
+        }
+        return out;
+    }
+
+    function ytsSearch(object, done, bag) {
+        var movie = object.movie || {};
+        if (movie.number_of_seasons) { done([], []); return; }
+        var imdb = normalizeImdb(movie.imdb_id);
+        var title = queryFor(object);
+        var query = imdb || title;
+        if (!query) { done([], []); return; }
+
+        var hosts = YTS_HOSTS.slice();
+        var hostIndex = 0;
+        var finished = false;
+
+        function finish(items, errors) {
+            if (finished) return;
+            finished = true;
+            done(items || [], errors || []);
+        }
+
+        function next() {
+            if (finished) return;
+            if (hostIndex >= hosts.length) { finish([], ['YTS: нет ответа']); return; }
+            var url = 'https://' + hosts[hostIndex++] + '/api/v2/list_movies.json?limit=50&query_term=' +
+                encodeURIComponent(query);
+            requestJson(url, function (err, json) {
+                if (finished) return;
+                if (err || !json || !json.data) { next(); return; }
+                var items = parseYts(json);
+                if (items.length) { finish(items, []); return; }
+                if (imdb && title && query === imdb) {
+                    query = title;
+                    hostIndex = 0;
+                    next();
+                    return;
+                }
+                finish([], []);
+            }, bag);
+        }
+
+        next();
+    }
+
+    function parseEztv(json, season) {
+        var out = [];
+        var list = json && json.torrents ? json.torrents : [];
+        for (var i = 0; i < list.length; i++) {
+            var t = list[i] || {};
+            if (season && int(t.season, 0) !== season) continue;
+            var hash = String(t.hash || '').toLowerCase();
+            if (!/^[a-f0-9]{40}$/.test(hash)) continue;
+            var title = clean(t.filename || t.title || '');
+            if (!title) continue;
+            out.push(makeItem({
+                title: title, tracker: 'EZTV',
+                seeds: t.seeds, peers: t.peers,
+                size: int(t.size_bytes, 0) || parseSize(t.small_size),
+                date: t.date_released_unix ? parseInt(t.date_released_unix, 10) * 1000 : '',
+                hash: hash,
+                magnet: /^magnet:/i.test(String(t.torrent_url || '')) ? t.torrent_url : '',
+                link: ''
+            }));
+        }
+        return out;
+    }
+
+    function eztvSearch(object, done, bag) {
+        var movie = object.movie || {};
+        if (!movie.number_of_seasons) { done([], []); return; }
+        var imdb = normalizeImdb(movie.imdb_id);
+        if (!imdb) { done([], []); return; }
+        var season = int(movie.season_number, 0);
+
+        var hosts = EZTV_HOSTS.slice();
+        var hostIndex = 0;
+        var finished = false;
+
+        function finish(items, errors) {
+            if (finished) return;
+            finished = true;
+            done(items || [], errors || []);
+        }
+
+        function next() {
+            if (finished) return;
+            if (hostIndex >= hosts.length) { finish([], ['EZTV: нет ответа']); return; }
+            var url = 'https://' + hosts[hostIndex++] + '/api/get-torrents?imdb_id=' +
+                encodeURIComponent(imdb) + '&limit=100';
+            requestJson(url, function (err, json) {
+                if (finished) return;
+                if (err || !json || !json.torrents) { next(); return; }
+                finish(parseEztv(json, season), []);
+            }, bag);
+        }
+
+        next();
+    }
+
+    function parseTpb(json) {
+        var out = [];
+        for (var i = 0; i < json.length; i++) {
+            var t = json[i] || {};
+            var hash = String(t.info_hash || '').toLowerCase();
+            if (!/^[a-f0-9]{40}$/.test(hash) || /^0+$/.test(hash)) continue;
+            out.push(makeItem({
+                title: t.name, tracker: 'TPB',
+                seeds: t.seeders, peers: t.leechers,
+                size: parseInt(t.size, 10) || 0,
+                date: t.added ? parseInt(t.added, 10) * 1000 : '',
+                hash: hash, magnet: '', link: ''
+            }));
+        }
+        return out;
+    }
+
+    function tpbSearch(object, queries, done, bag) {
+        var q = queries[0] || queryFor(object);
+        if (!q) { done([], []); return; }
+        requestJson('https://apibay.org/q.php?q=' + encodeURIComponent(q),
+            function (err, json) {
+                if (err) { done([], [err]); return; }
+                if (!json || Object.prototype.toString.call(json) !== '[object Array]' || !json.length) {
+                    done([], []);
+                    return;
+                }
+                done(parseTpb(json), []);
+            }, bag);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* IMDb ID из TMDB external_ids                                        */
+    /* ------------------------------------------------------------------ */
+
+    function ensureImdb(object, callback) {
+        var movie = object.movie || {};
+        var imdb = normalizeImdb(movie.imdb_id);
+        if (imdb) { callback(imdb); return; }
+        var id = movie.id;
+        if (!id) { callback(''); return; }
+
+        var key = String(id);
+        if (Object.prototype.hasOwnProperty.call(imdbCache, key)) {
+            callback(imdbCache[key]);
+            return;
+        }
+
+        var type = movie.number_of_seasons ? 'tv' : 'movie';
+        var url;
+        try {
+            url = Lampa.TMDB.api(type + '/' + id + '/external_ids?api_key=' + Lampa.TMDB.key());
+        } catch (e) { callback(''); return; }
+
+        requestJson(url, function (err, json) {
+            var out = (json && json.imdb_id) ? String(json.imdb_id) : '';
+            imdbCache[key] = out;
+            callback(out);
+        });
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Оркестрация                                                         */
+    /* ------------------------------------------------------------------ */
+
+    function runExternal(object, callback) {
+        readConfig();
+
+        var search = {
+            id: ++state.seq,
+            done: false,
+            canceled: false,
+            nets: [],
+            items: [],
+            errors: [],
+            counts: {},
+            query: '',
+            variants: [],
+            started: Date.now(),
+            timer: null
+        };
+        state.searches[search.id] = search;
+
+        var guard = setTimeout(function () {
+            search.errors.push('общий таймаут');
+            finish();
+        }, cfg.timeout * 1000 + 15000);
+        search.timer = guard;
+
+        function finish() {
+            if (search.done) return;
+            search.done = true;
+            clearTimeout(guard);
+            delete state.searches[search.id];
+
+            var items = dedupeItems(search.items);
+            if (cfg.hide_ru) {
+                var filtered = [];
+                for (var i = 0; i < items.length; i++) {
+                    if (!isRuAudio(items[i].Title || '')) filtered.push(items[i]);
+                }
+                items = filtered;
+            }
+            items.sort(compareForeign);
+            if (items.length > MAX_RESULTS) items = items.slice(0, MAX_RESULTS);
+
+            state.last = {
+                time: Date.now(),
+                query: search.query,
+                variants: search.variants.slice(),
+                counts: search.counts,
+                errors: search.errors.slice(),
+                found: items.length,
+                duration: Date.now() - search.started
+            };
+
+            try { callback(items, search.errors.slice()); } catch (e) { warn('callback', e); }
+        }
+
+        buildQueries(object, function (queries) {
+            if (search.done || search.canceled) return;
+
+            search.query = queries[0] || queryFor(object);
+            search.variants = queries.slice();
+
+            var movie = object.movie || {};
+            var isSeries = !!(movie.number_of_seasons || movie.original_name || movie.name || movie.first_air_date);
+            var anime = isAnimeCard(object);
+
+            var pending = 0;
+            var plannedDone = false;
+
+            function runTask(task) {
+                if (search.done || search.canceled) return;
+                pending++;
+                var called = false;
+                var timer = setTimeout(function () {
+                    taskDone(task, [], ['таймаут']);
+                }, cfg.timeout * 1000 + 8000);
+
+                function taskDone(t, items, errors) {
+                    if (called) return;
+                    called = true;
+                    clearTimeout(timer);
+                    if (search.done || search.canceled) return;
+                    search.counts[t.id] = (items || []).length;
+                    if (errors && errors.length) {
+                        search.errors.push(t.title + ': ' + errors.join('; '));
+                    }
+                    if (items && items.length) search.items = search.items.concat(items);
+                    pending--;
+                    if (pending <= 0 && plannedDone) finish();
+                }
+
+                try {
+                    task.run(function (items, errors) {
+                        taskDone(task, items, errors || []);
+                    });
+                } catch (e) {
+                    taskDone(task, [], [e && e.message ? e.message : 'ошибка']);
+                }
+            }
+
+            function finalizePlan() {
+                if (plannedDone) return;
+                plannedDone = true;
+                if (pending <= 0) finish();
+            }
+
+            // Источники, которым не нужен IMDb, запускаем сразу — они не
+            // должны ждать TMDB external_ids.
+            if (srcOn('nyaa')) runTask({ id: 'nyaa', title: 'Nyaa', run: function (done) { nyaaSearch(object, queries, done, search.nets); } });
+            if (anime && srcOn('anidex')) runTask({ id: 'anidex', title: 'AniDex', run: function (done) { anidexSearch(object, queries, done, search.nets); } });
+            if (!isSeries && !anime && srcOn('yts')) runTask({ id: 'yts', title: 'YTS', run: function (done) { ytsSearch(object, done, search.nets); } });
+            if (srcOn('tpb')) runTask({ id: 'tpb', title: 'TPB', run: function (done) { tpbSearch(object, queries, done, search.nets); } });
+
+            var imdbTasks = [];
+            if (srcOn('torrentio')) imdbTasks.push({ id: 'torrentio', title: 'Torrentio', run: function (done) { torrentioSearch(object, done, search.nets); } });
+            if (isSeries && !anime && srcOn('eztv')) imdbTasks.push({ id: 'eztv', title: 'EZTV', run: function (done) { eztvSearch(object, done, search.nets); } });
+
+            if (imdbTasks.length) {
+                ensureImdb(object, function (imdb) {
+                    if (imdb) { try { object.movie.imdb_id = imdb; } catch (e) {} }
+                    for (var i = 0; i < imdbTasks.length; i++) runTask(imdbTasks[i]);
+                    finalizePlan();
+                });
+            } else {
+                finalizePlan();
+            }
+        });
+
+        return search.id;
+    }
+
+    function cancelAll() {
+        for (var id in state.searches) {
+            if (!Object.prototype.hasOwnProperty.call(state.searches, id)) continue;
+            var search = state.searches[id];
+            search.canceled = true;
+            clearTimeout(search.timer);
+            for (var i = 0; i < search.nets.length; i++) {
+                try { search.nets[i].clear(); } catch (e) {}
+            }
+        }
+        state.searches = {};
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Перехват Parser.get                                                 */
+    /* ------------------------------------------------------------------ */
 
     function wrapParser() {
         if (state.hooked) return true;
         if (!window.Lampa || !Lampa.Parser || typeof Lampa.Parser.get !== 'function') return false;
 
-        neutralizeOldVersion();
         state.originalGet = Lampa.Parser.get;
         state.originalClear = Lampa.Parser.clear;
 
-        Lampa.Parser.get = function (params, oncomplite, onerror) {
+        Lampa.Parser.get = function (object, oncomplete, onerror) {
             var self = this;
-            var original = state.originalGet;
+            var params = object || {};
             readConfig();
 
-            var kinds = allowedKinds(params || {});
-            var has = false;
-            for (var i = 0; i < sources.length; i++) if (sourceMatches(sources[i], kinds)) has = true;
+            if (!cfg.enabled) return state.originalGet.call(self, params, oncomplete, onerror);
 
-            if (!cfg.enabled || !has) return original.call(self, params, oncomplite, onerror);
-
-            var called = false;
-            var externalDone = false;
+            var finished = false;
+            var started = Date.now();
             var standardDone = !cfg.merge;
-            var external = { Results: [], errors: [] };
+            var externalDone = false;
             var standard = null;
-            var key = cardKey(params || {});
+            var external = null;
+            var key = cardKey(params);
 
-            var guard = setTimeout(function () { finish(true); }, cfg.timeout * 1000 + 5000);
+            var guard = setTimeout(function () { finish(true); }, cfg.timeout * 1000 + 18000);
 
             function deliver(data) {
-                if (called) return;
-                called = true;
+                if (finished) return;
+                finished = true;
                 clearTimeout(guard);
                 state.lastByCard[key] = data;
-                try { oncomplite(data); } catch (e) { warn('oncomplite', e); }
+                try { oncomplete(data); } catch (e) { warn('oncomplete', e); }
             }
 
             function finish(force) {
-                if (called) return;
-                if (!externalDone && !force) return;
-                if (!standardDone && !force) return;
+                if (finished) return;
+                if (state.clearTime >= started) {
+                    finished = true;
+                    clearTimeout(guard);
+                    return;
+                }
+                if (!force && (!standardDone || !externalDone)) return;
 
-                var results = [];
-                if (cfg.merge && standard && standard.Results) results = results.concat(standard.Results);
-                results = results.concat(external.Results || []);
-                results = applyAudio(dedupe(results));
+                var foreign = external && external.Results ? external.Results.slice() : [];
+                var std = (standard && standard.Results) ? standard.Results.slice() : [];
+                var results = dedupeItems(foreign.concat(std));
 
                 if (!results.length && !cfg.merge && cfg.fallback) {
-                    called = true;
+                    finished = true;
                     clearTimeout(guard);
-                    try { return original.call(self, params, oncomplite, onerror); } catch (e) {
+                    try {
+                        return state.originalGet.call(self, params, oncomplete, onerror);
+                    } catch (e) {
                         warn('fallback', e);
                         try { onerror(e && e.message ? e.message : 'fallback error'); } catch (err) {}
+                        return;
                     }
                 }
 
                 deliver({ Results: results });
-                if (cfg.notify && external.errors && external.errors.length) notify('EN Sources: ' + external.errors.join('; '));
             }
 
-            runExternal(params || {}, function (data) {
-                external = data;
+            runExternal(params, function (items, errors) {
+                external = { Results: items || [], errors: errors || [] };
                 externalDone = true;
+                if (errors && errors.length) log('источники:', errors.join(' · '));
                 finish(false);
-            }, false);
+            });
 
             if (cfg.merge) {
                 try {
-                    original.call(self, params, function (data) {
+                    state.originalGet.call(self, params, function (data) {
                         standard = data;
                         standardDone = true;
                         finish(false);
@@ -938,630 +1369,357 @@
         };
 
         Lampa.Parser.clear = function () {
-            cancelSearches();
+            state.clearTime = Date.now();
+            cancelAll();
             if (state.originalClear) return state.originalClear.apply(this, arguments);
         };
 
-        Lampa.Parser.__en_sources_v2 = true;
+        Lampa.Parser.__en_sources_v3 = true;
         state.hooked = true;
         api.status = 'ready';
-        log('Parser.get подключен. Ядро Lampa:', coreVersion());
+        log('Parser.get перехвачен; ядро Lampa:', coreVersion());
         return true;
     }
 
-    function wrapTorrentComponent() {
+    /*
+     * Зарубежные раздачи — всегда первыми (Lampa после нашего oncomplete
+     * сортирует список по своему «popular», поэтому порядок пере-применяем).
+     */
+    function wrapSort() {
+        if (state.sortWrapped) return true;
         try {
-            if (!Lampa.Component || !Lampa.Component.get || !Lampa.Component.add) return;
-            var Original = Lampa.Component.get('torrents');
-            if (!Original || Original.__en_sources_v2) return;
-            state.originalTorrents = Original;
+            if (!Lampa.Component || !Lampa.Component.get || !Lampa.Component.add) return false;
+            var Orig = Lampa.Component.get('torrents');
+            if (!Orig || Orig.__en_v3_sort) { state.sortWrapped = true; return true; }
+            state.originalTorrents = Orig;
 
             function Wrapped(object) {
-                Original.call(this, object);
+                Orig.call(this, object);
                 var sortResults = this.sortResults;
                 if (typeof sortResults !== 'function') return;
                 var key = cardKey(object || {});
+
                 this.sortResults = function (need) {
                     sortResults.call(this, need);
-                    readConfig();
-                    if (!cfg.enabled || cfg.audio !== 'prefer' || need !== 'popular') return;
                     var data = state.lastByCard[key];
-                    if (data && data.Results) {
-                        for (var si = 0; si < data.Results.length; si++) data.Results[si].__en_sort_index = si;
-                        data.Results.sort(function (a, b) {
-                            var ra = a.en_audio === true ? 0 : (a.en_audio === null ? 1 : 2);
-                            var rb = b.en_audio === true ? 0 : (b.en_audio === null ? 1 : 2);
-                            if (ra !== rb) return ra - rb;
-                            return (a.__en_sort_index || 0) - (b.__en_sort_index || 0);
-                        });
+                    if (!data || !data.Results || !data.Results.length) return;
+
+                    var foreign = [];
+                    var standard = [];
+                    for (var i = 0; i < data.Results.length; i++) {
+                        var it = data.Results[i];
+                        if (it && (it.en_sources_v3 || it.en_public)) foreign.push(it);
+                        else standard.push(it);
                     }
+                    if (!foreign.length) return;
+
+                    data.Results.length = 0;
+                    for (var f = 0; f < foreign.length; f++) data.Results.push(foreign[f]);
+                    for (var s = 0; s < standard.length; s++) data.Results.push(standard[s]);
                 };
             }
-            Wrapped.__en_sources_v2 = true;
-            if (Original.prototype) Wrapped.prototype = Original.prototype;
+
+            Wrapped.__en_v3_sort = true;
+            if (Orig.prototype) Wrapped.prototype = Orig.prototype;
             Lampa.Component.add('torrents', Wrapped);
+            state.sortWrapped = true;
+            return true;
         } catch (e) {
             warn('component wrap', e);
+            return false;
         }
     }
 
-    function onTorrentRender(e) {
+    /* ------------------------------------------------------------------ */
+    /* Настройки и диагностика                                             */
+    /* ------------------------------------------------------------------ */
+
+    function addParam(name, type, def, title, description, values, onChange, onRender) {
+        var param = { name: PREFIX + name, type: type };
+        if (typeof def !== 'undefined') param['default'] = def;
+        if (values) param.values = values;
+        var data = {
+            component: COMPONENT,
+            param: param,
+            field: { name: title, description: description || '' }
+        };
+        if (onChange) data.onChange = onChange;
+        if (onRender) data.onRender = onRender;
+        try { Lampa.SettingsApi.addParam(data); } catch (e) { warn('addParam ' + name, e); }
+    }
+
+    function statusText() {
+        var on = 0;
+        for (var i = 0; i < SOURCES.length; i++) if (srcOn(SOURCES[i].id)) on++;
+        return 'v' + VERSION + ' · ядро ' + coreVersion() + ' · ' +
+            (state.hooked ? 'поиск перехвачен' : 'ожидание Parser') + ' · источников ' + on + '/' + SOURCES.length;
+    }
+
+    function registerSettings() {
+        if (state.settings) return;
+        if (!window.Lampa || !Lampa.SettingsApi || !Lampa.SettingsApi.addComponent) return;
+
         try {
-            if (!e || e.type !== 'render' || !e.element || !e.element.en_sources_v2 || !e.item) return;
-            var el = e.element;
-            if (e.item.find && e.item.find('.en-sources-tags').length) return;
-            var audio = el.en_audio === true ? 'EN' : (el.en_audio === false ? 'не EN' : 'язык ?');
-            var cls = el.en_audio === true ? 'en' : (el.en_audio === false ? 'other' : 'unknown');
-            var html = '<div class="en-sources-tags">' +
-                '<span class="en-sources-tag en-sources-tag--source">' + esc(el.en_source_name || 'EN Sources') + '</span>' +
-                '<span class="en-sources-tag en-sources-tag--' + cls + '">' + esc(audio) + '</span>' +
-                '</div>';
-            var target = e.item.find ? e.item.find('.torrent-item__title').first() : null;
-            if (target && target.length) target.after(html);
-            else if (e.item.append) e.item.append(html);
-        } catch (err) {}
-    }
-
-    function addStyle() {
-        if (document.getElementById('en-sources-v2-style')) return;
-        var style = document.createElement('style');
-        style.id = 'en-sources-v2-style';
-        style.type = 'text/css';
-        style.appendChild(document.createTextNode([
-            '.en-sources-head{width:auto!important;min-width:3.4em;padding:0 .6em!important;display:-webkit-box;display:-ms-flexbox;display:flex;-webkit-box-align:center;-ms-flex-align:center;align-items:center;gap:.35em;border-radius:.7em;color:#94a3b8;border:1px solid rgba(148,163,184,.25);background:rgba(15,23,42,.55);transition:color .2s,background .2s,border-color .2s}',
-            '.en-sources-head svg{width:1.25em;height:1.25em;flex:0 0 auto}',
-            '.en-sources-head__label{font-size:.72em;font-weight:800;letter-spacing:.08em;line-height:1}',
-            '.en-sources-head.is-on{color:#5eead4;border-color:rgba(45,212,191,.65);background:rgba(13,148,136,.18);box-shadow:0 0 1em rgba(20,184,166,.25)}',
-            '.en-sources-head.focus,.en-sources-head:hover{color:#f8fafc;border-color:#2dd4bf}',
-            '.en-sources-tags{display:-webkit-box;display:-ms-flexbox;display:flex;-ms-flex-wrap:wrap;flex-wrap:wrap;gap:.35em;margin-top:.4em;font-size:.75em}',
-            '.en-sources-tag{padding:.15em .55em;border-radius:.45em;background:rgba(148,163,184,.16);color:#cbd5e1;white-space:nowrap}',
-            '.en-sources-tag--en{background:rgba(16,185,129,.2);color:#6ee7b7}',
-            '.en-sources-tag--unknown{background:rgba(245,158,11,.18);color:#fcd34d}',
-            '.en-sources-tag--other{background:rgba(239,68,68,.16);color:#fca5a5}',
-            '.en-sources-modal{max-height:62vh;overflow:auto;padding:.2em .6em .2em 0;line-height:1.55}',
-            '.en-sources-modal h3{margin:.2em 0 .5em;color:#5eead4;font-size:1.1em}',
-            '.en-sources-modal p{margin:.35em 0;color:#e2e8f0}',
-            '.en-sources-modal code{display:block;word-break:break-all;background:rgba(15,23,42,.7);padding:.6em;border-radius:.5em;color:#a7f3d0}',
-            '.en-sources-modal::-webkit-scrollbar{width:8px}',
-            '.en-sources-modal::-webkit-scrollbar-track{background:#0f172a;border-radius:8px}',
-            '.en-sources-modal::-webkit-scrollbar-thumb{background:#14b8a6;border-radius:8px}',
-            '.en-sources-modal::-webkit-scrollbar-thumb:hover{background:#2dd4bf}'
-        ].join('\n')));
-        (document.head || document.documentElement).appendChild(style);
-    }
-
-    function updateHead() {
-        if (!state.head) return;
-        var on = cfg.enabled;
-        try {
-            state.head.toggleClass('is-on', on);
-            state.head.attr('title', on ? 'EN Sources: включено' : 'EN Sources: выключено');
-            state.head.attr('aria-pressed', on ? 'true' : 'false');
-            state.head.find('.en-sources-head__label').text(on ? 'EN ON' : 'EN OFF');
-        } catch (e) {}
-    }
-
-    function toggleEnabled() {
-        readConfig();
-        cfg.enabled = !cfg.enabled;
-        setBool(K.enabled, cfg.enabled);
-        updateHead();
-        refreshSettings();
-        notify(cfg.enabled ? 'EN Sources включены' : 'EN Sources выключены: стандартный поиск Lampa');
-    }
-
-    function addHead() {
-        if (!cfg.head || state.head) return;
-        var el = null;
-        try {
-            if (Lampa.Head && Lampa.Head.addIcon) el = Lampa.Head.addIcon(HEAD_ICON, toggleEnabled);
-        } catch (e) {}
-        if (!el && $) {
-            el = $('<div class="head__action selector"></div>');
-            $('.head__actions').prepend(el);
-            el.on('hover:enter click', toggleEnabled);
+            Lampa.SettingsApi.addComponent({
+                component: COMPONENT,
+                name: 'EN Sources 3',
+                icon: ICON
+            });
+        } catch (e) {
+            warn('addComponent', e);
         }
-        if (!el) return;
-        if (el.addClass) el.addClass('en-sources-head');
-        else el.className += ' en-sources-head';
-        try {
-            el.append('<span class="en-sources-head__label">EN OFF</span>');
-        } catch (e) {}
-        state.head = el;
-        updateHead();
-    }
 
-    function removeHead() {
-        if (!state.head) return;
-        try { state.head.remove(); } catch (e) {}
-        state.head = null;
-    }
+        addParam('section_search', 'title', undefined, 'Поиск', '');
+        addParam('enabled', 'trigger', true, 'Включить плагин',
+            'Добавлять зарубежные источники к поиску Lampa.', null, function () { readConfig(); });
+        addParam('merge', 'trigger', true, 'Объединять со штатным поиском',
+            'Показывать и результаты встроенного парсера Lampa (Jackett/Prowlarr/TorrServer).', null, function () { readConfig(); });
+        addParam('fallback', 'trigger', true, 'Откат к штатному поиску',
+            'Если зарубежные источники ничего не нашли в режиме замены.', null, function () { readConfig(); });
+        addParam('prefer_en', 'trigger', true, 'Предпочитать английский (озвучку/сабы)',
+            'Сначала релизы с английским дубляжом или английскими субтитрами.', null, function () { readConfig(); });
+        addParam('hide_ru', 'trigger', false, 'Скрывать русскую озвучку',
+            'Скрывает только явную русскую озвучку/дубляж. Метка [RUS] в субтитрах не скрывает раздачу.', null, function () { readConfig(); });
+        addParam('timeout', 'select', '20', 'Таймаут',
+            'Сколько ждать ответа источников.', {
+                '10': '10 секунд',
+                '15': '15 секунд',
+                '20': '20 секунд',
+                '30': '30 секунд'
+            }, function () { readConfig(); });
 
-    function refreshSettings() {
-        try {
-            if (state.settingsName === COMPONENT && Lampa.Settings && Lampa.Settings.update) Lampa.Settings.update();
-        } catch (e) {}
-    }
+        addParam('section_sources', 'title', undefined, 'Источники', '');
+        for (var i = 0; i < SOURCES.length; i++) {
+            (function (s) {
+                addParam('src_' + s.id, 'trigger', s.def, s.title,
+                    s.id === 'nyaa' ? 'Основной источник аниме; для фильмов/сериалов — категория Live Action.' : '',
+                    null, function () { readConfig(); });
+            })(SOURCES[i]);
+        }
 
-    function ask(title, value, cb, password) {
-        try {
-            if (Lampa.Input && Lampa.Input.edit) {
-                Lampa.Input.edit({ title: title, value: value || '', free: true, nosave: true, password: !!password }, function (v) {
-                    cb(trim(v));
-                });
-                return;
-            }
-        } catch (e) {}
-        var v = window.prompt(title, value || '');
-        if (v !== null) cb(trim(v));
+        addParam('section_test', 'title', undefined, 'Проверка', '');
+        addParam('test', 'button', undefined, 'Проверить источники', 'Фильм, сериал и аниме; результат с количеством по каждому источнику.', null, testAll);
+        addParam('diagnostics', 'button', undefined, 'Диагностика', 'Состояние и последний поиск.', null, showDiagnostics);
+        addParam('status', 'static', undefined, 'Состояние', ' ', null, null, function (item) {
+            try { item.find('.settings-param__descr').text(statusText()); } catch (e) {}
+        });
+
+        state.settings = true;
+        log('настройки зарегистрированы');
     }
 
     function restoreController(name) {
         try { Lampa.Controller.toggle(name || 'settings_component'); } catch (e) {}
     }
 
-    function choose(title, items, onSelect, onBack) {
-        var controller = 'settings_component';
-        try { controller = Lampa.Controller.enabled().name || controller; } catch (e) {}
-        try {
-            Lampa.Select.show({
-                title: title,
-                items: items,
-                onSelect: function (a) { onSelect(a, controller); },
-                onBack: function () { if (onBack) onBack(controller); else restoreController(controller); }
-            });
-        } catch (e) { warn('select', e); }
-    }
-
-    function typeLabel(type) {
-        if (type === 'jackett') return 'Jackett / JacRed';
-        if (type === 'prowlarr') return 'Prowlarr';
-        if (type === 'torznab') return 'Torznab / Newznab';
-        return 'Internet Archive';
-    }
-
-    function kindLabel(kind) {
-        if (kind === 'movie') return 'фильмы';
-        if (kind === 'tv') return 'сериалы';
-        if (kind === 'anime') return 'аниме';
-        return 'все категории';
-    }
-
-    function sourceSubtitle(src) {
-        var mask = src.key ? 'ключ задан' : 'без ключа';
-        return typeLabel(src.type) + ' · ' + kindLabel(src.kind) + ' · ' + (src.enabled ? 'включен' : 'выключен') + ' · ' + mask;
-    }
-
-    function saveAndRefresh() {
-        saveSources();
-        refreshSettings();
-    }
-
-    function deleteSource(index, controller) {
-        choose('Удалить источник?', [
-            { title: 'Да, удалить', yes: true },
-            { title: 'Отмена', no: true }
-        ], function (a) {
-            if (a.yes) {
-                sources.splice(index, 1);
-                saveAndRefresh();
-                notify('Источник удалён');
-            }
-            restoreController(controller);
-        }, function () { restoreController(controller); });
-    }
-
-    function testSource(index, controller) {
-        ask('Проверочный запрос', 'Plan 9 from Outer Space', function (q) {
-            if (!q) { restoreController(controller); return; }
-            var src = sources[index];
-            if (!src) { restoreController(controller); return; }
-            notify('Проверяю ' + src.name + '...');
-            var params = { search: q, from_search: true, movie: { title: q, original_title: q } };
-            runSource(src, params, function (items) {
-                notify(src.name + ': найдено ' + items.length);
-                log('test', src.name, items.length);
-                restoreController(controller);
-            }, function (msg) {
-                notify(src.name + ': ' + msg);
-                warn('test', src.name, msg);
-                restoreController(controller);
-            });
-        });
-    }
-
-    function sourceMenu(index) {
-        var src = sources[index];
-        if (!src) return;
-        var items = [
-            { title: 'Название', subtitle: src.name, action: 'name' },
-            { title: 'Тип', subtitle: typeLabel(src.type), action: 'type' },
-            { title: 'URL', subtitle: src.url || 'не задан', action: 'url' },
-            { title: 'API-ключ', subtitle: src.key ? 'задан' : 'не требуется / не задан', action: 'key' },
-            { title: 'Категории', subtitle: kindLabel(src.kind), action: 'kind' },
-            { title: src.enabled ? 'Выключить источник' : 'Включить источник', action: 'toggle' },
-            { title: 'Проверить источник', action: 'test' },
-            { title: 'Удалить источник', action: 'delete' }
-        ];
-        if (src.type === 'archive') items.splice(5, 0, { title: 'Коллекции', subtitle: src.collections || 'все', action: 'collections' });
-        choose(src.name, items, function (a, controller) {
-            if (a.action === 'name') {
-                ask('Название источника', src.name, function (v) {
-                    if (v) src.name = v;
-                    saveAndRefresh();
-                    sourceMenu(index);
-                });
-            } else if (a.action === 'type') {
-                choose('Тип источника', [
-                    { title: 'Jackett / JacRed', value: 'jackett' },
-                    { title: 'Prowlarr', value: 'prowlarr' },
-                    { title: 'Torznab / Newznab', value: 'torznab' },
-                    { title: 'Internet Archive', value: 'archive' }
-                ], function (b) {
-                    src.type = b.value;
-                    if (src.type === 'archive' && !src.url) src.url = 'https://archive.org';
-                    saveAndRefresh();
-                    sourceMenu(index);
-                }, function () { sourceMenu(index); });
-            } else if (a.action === 'url') {
-                ask('URL сервера или API endpoint', src.url, function (v) {
-                    if (v && !validUrl(v)) notify('URL должен начинаться с http:// или https://');
-                    else {
-                        src.url = v.replace(/\/+$/, '');
-                        saveAndRefresh();
-                    }
-                    sourceMenu(index);
-                });
-            } else if (a.action === 'key') {
-                ask('API-ключ', src.key, function (v) {
-                    src.key = v;
-                    saveAndRefresh();
-                    sourceMenu(index);
-                }, true);
-            } else if (a.action === 'kind') {
-                choose('Категории источника', [
-                    { title: 'Все', value: 'all' },
-                    { title: 'Фильмы', value: 'movie' },
-                    { title: 'Сериалы', value: 'tv' },
-                    { title: 'Аниме', value: 'anime' }
-                ], function (b) {
-                    src.kind = b.value;
-                    saveAndRefresh();
-                    sourceMenu(index);
-                }, function () { sourceMenu(index); });
-            } else if (a.action === 'collections') {
-                ask('Коллекции Internet Archive через запятую', src.collections, function (v) {
-                    src.collections = v;
-                    saveAndRefresh();
-                    sourceMenu(index);
-                });
-            } else if (a.action === 'toggle') {
-                src.enabled = !src.enabled;
-                saveAndRefresh();
-                sourceMenu(index);
-            } else if (a.action === 'test') {
-                testSource(index, controller);
-            } else if (a.action === 'delete') {
-                deleteSource(index, controller);
-            }
-        });
-    }
-
-    function addSource() {
-        if (sources.length >= MAX_SOURCES) {
-            notify('Максимум источников: ' + MAX_SOURCES);
-            return;
-        }
-        choose('Тип нового источника', [
-            { title: 'Jackett / JacRed', subtitle: 'Ваш сервер или разрешённый API', value: 'jackett' },
-            { title: 'Prowlarr', subtitle: 'Ваш сервер индексаторов', value: 'prowlarr' },
-            { title: 'Torznab / Newznab', subtitle: 'Совместимый RSS/API endpoint', value: 'torznab' },
-            { title: 'Internet Archive', subtitle: 'Открытые коллекции', value: 'archive' }
-        ], function (a) {
-            var src = cleanSource({
-                type: a.value,
-                name: typeLabel(a.value),
-                url: a.value === 'archive' ? 'https://archive.org' : '',
-                enabled: true,
-                kind: 'all',
-                collections: a.value === 'archive' ? 'feature_films' : ''
-            }, sources.length);
-            sources.push(src);
-            saveAndRefresh();
-            sourceMenu(sources.length - 1);
-        });
-    }
-
     function modal(title, html) {
         try {
-            if (!$ || !Lampa.Modal) { notify(title); return; }
-            var box = $('<div class="en-sources-modal"></div>').html(html);
-            var controller = 'settings_component';
-            try { controller = Lampa.Controller.enabled().name || controller; } catch (e) {}
+            if (!Lampa.Modal) { notify(title); return; }
+            var previous = 'settings_component';
+            try { previous = Lampa.Controller.enabled().name || previous; } catch (e) {}
+            var body = html;
+            if ($) body = $('<div class="en-src-modal"></div>').html(html);
             Lampa.Modal.open({
                 title: title,
-                html: box,
+                html: body,
                 size: 'medium',
                 onBack: function () {
                     try { Lampa.Modal.close(); } catch (e) {}
-                    restoreController(controller);
+                    restoreController(previous);
                 }
             });
-        } catch (e) { warn('modal', e); }
-    }
-
-    function diagnosticsHtml(result) {
-        var enabled = 0;
-        for (var i = 0; i < sources.length; i++) if (sources[i].enabled) enabled++;
-        var html = '<h3>Состояние</h3>' +
-            '<p>Версия плагина: ' + esc(VERSION) + '<br>Версия веб-ядра Lampa: ' + esc(coreVersion()) + '<br>Переключатель: ' + (cfg.enabled ? 'включён' : 'выключен') + '<br>Перехват поиска: ' + (state.hooked ? 'активен' : 'не активен') + '<br>Источники: ' + enabled + ' из ' + sources.length + '</p>' +
-            '<h3>Установка</h3><code>' + esc(PLUGIN_URL) + '</code>' +
-            '<p>Если файл обновлён на GitHub, добавьте ?v=2 к ссылке или перезапустите Lampa.</p>';
-        if (result) {
-            html += '<h3>Проверка</h3><p>Запрос: ' + esc(result.query || '') + '<br>Найдено: ' + result.found + '<br>Источников опрошено: ' + result.sources + '</p>';
-            if (result.errors && result.errors.length) {
-                html += '<h3>Ошибки</h3>';
-                for (var j = 0; j < result.errors.length; j++) html += '<p>' + esc(result.errors[j]) + '</p>';
-            }
-        } else if (state.last) {
-            html += '<h3>Последний поиск</h3><p>' + esc(state.last.query) + ' · найдено ' + state.last.found + '</p>';
-            if (state.last.errors.length) for (var k = 0; k < state.last.errors.length; k++) html += '<p>' + esc(state.last.errors[k]) + '</p>';
+        } catch (e) {
+            warn('modal', e);
+            notify(title);
         }
-        html += '<h3>Примечание</h3><p>Используйте только свои или разрешённые индексаторы и контент, на который у вас есть права. Строгий режим EN оставляет только раздачи с явно определённой английской дорожкой.</p>';
-        return html;
     }
 
-    function showDiagnostics(result) {
-        modal('EN Sources · диагностика', diagnosticsHtml(result));
+    function sourceLine(id) {
+        if (!srcOn(id)) return 'выкл';
+        var last = state.last;
+        if (last && Object.prototype.hasOwnProperty.call(last.counts, id)) return String(last.counts[id]);
+        return '—';
+    }
+
+    function showDiagnostics() {
+        var last = state.last;
+        var html = '<h3>Состояние</h3>' +
+            '<p>Версия: <b>' + esc(VERSION) + '</b><br>' +
+            'Ядро Lampa: ' + esc(coreVersion()) + '<br>' +
+            'Перехват поиска: ' + (state.hooked ? 'активен' : 'не активен') + '<br>' +
+            'Плагин: ' + (cfg.enabled ? 'включён' : 'выключен') + '</p>';
+
+        html += '<h3>Источники</h3>';
+        for (var i = 0; i < SOURCES.length; i++) {
+            html += '<p>' + esc(SOURCES[i].title) + ': ' + sourceLine(SOURCES[i].id) + '</p>';
+        }
+
+        if (last) {
+            html += '<h3>Последний поиск</h3>' +
+                '<p>Запрос: <b>' + esc(last.query || '—') + '</b><br>' +
+                'Найдено: ' + last.found + '<br>' +
+                'Время: ' + Math.round(last.duration / 1000) + ' сек.</p>';
+            if (last.errors && last.errors.length) {
+                html += '<h3>Ошибки</h3>';
+                for (var j = 0; j < last.errors.length; j++) html += '<p>' + esc(last.errors[j]) + '</p>';
+            }
+        } else {
+            html += '<h3>Последний поиск</h3><p>Ещё не выполнялся.</p>';
+        }
+
+        html += '<h3>Блокировки</h3>' +
+            '<p>Плагин ходит напрямую, без прокси. Добавьте в ваше средство обхода домены:<br>' +
+            '<b>nyaa.si, anidex.info, torrentio.strem.fun, yts.mx, eztvx.to, apibay.org, ' +
+            'shikimori.io, graphql.anilist.co, api.themoviedb.org</b>.<br>' +
+            'Если источник отдаёт «сеть/Cloudflare» — его домен не обойдён или недоступен.</p>';
+
+        modal('EN Sources · диагностика', html);
     }
 
     function testAll() {
-        ask('Проверочный запрос', 'Plan 9 from Outer Space', function (q) {
-            if (!q) return;
-            notify('Проверяю источники...');
-            var params = { search: q, from_search: true, movie: { title: q, original_title: q } };
-            runExternal(params, function () {
-                showDiagnostics(state.last);
-            }, true);
-        });
-    }
+        notify('Проверяю источники...');
+        var probes = [
+            { name: 'фильм', search: 'Inception', movie: { id: 27205, title: 'Inception', original_title: 'Inception', imdb_id: 'tt1375666' } },
+            { name: 'сериал', search: 'Breaking Bad', movie: { id: 1396, title: 'Breaking Bad', original_name: 'Breaking Bad', number_of_seasons: 5, season_number: 1, episode_number: 1, imdb_id: 'tt0903747' } },
+            { name: 'аниме', search: 'Frieren', movie: { id: 145064, title: 'Frieren', original_name: '葬送のフリーレン', number_of_seasons: 1, season_number: 1, episode_number: 1, original_language: 'ja', genres: [{ id: 16 }] } }
+        ];
 
-    function exportConfig() {
-        var data = { version: VERSION, sources: sources };
-        var text = JSON.stringify(data, null, 2);
-        try {
-            if (Lampa.Utils && Lampa.Utils.copyTextToClipboard) {
-                Lampa.Utils.copyTextToClipboard(text, function () { notify('Настройки скопированы'); }, function () { modal('Экспорт настроек', '<code>' + esc(text) + '</code>'); });
+        var agg = { counts: {}, errors: {}, names: {} };
+        var idx = 0;
+
+        function step() {
+            if (idx >= probes.length) {
+                var html = '<h3>Результат проверки</h3>';
+                for (var i = 0; i < SOURCES.length; i++) {
+                    var id = SOURCES[i].id;
+                    var count = agg.counts[id] !== undefined ? agg.counts[id] : '—';
+                    html += '<p>' + esc(SOURCES[i].title) + ': <b>' + count + '</b>' +
+                        (srcOn(id) ? '' : ' (выкл)') + '</p>';
+                }
+                var keys = [];
+                for (var e in agg.errors) if (Object.prototype.hasOwnProperty.call(agg.errors, e)) keys.push(e);
+                if (keys.length) {
+                    html += '<h3>Ошибки</h3>';
+                    for (var k = 0; k < keys.length; k++) html += '<p>' + esc(keys[k]) + '</p>';
+                }
+                modal('EN Sources · проверка', html);
                 return;
             }
-        } catch (e) {}
-        modal('Экспорт настроек', '<code>' + esc(text) + '</code>');
+            var probe = probes[idx++];
+            runExternal(probe, function () {
+                var last = state.last;
+                if (last) {
+                    for (var id in last.counts) {
+                        if (!Object.prototype.hasOwnProperty.call(last.counts, id)) continue;
+                        agg.counts[id] = Math.max(agg.counts[id] || 0, last.counts[id]);
+                    }
+                    for (var e2 = 0; e2 < last.errors.length; e2++) agg.errors[last.errors[e2]] = 1;
+                }
+                step();
+            });
+        }
+
+        step();
     }
 
-    function importConfig() {
-        ask('JSON настроек', '', function (text) {
-            if (!text) return;
+    /* ------------------------------------------------------------------ */
+    /* Жизненный цикл                                                      */
+    /* ------------------------------------------------------------------ */
+
+    function follow(target, event, callback) {
+        if (!target || !target.follow) return;
+        target.follow(event, callback);
+        state.listeners.push({ target: target, event: event, callback: callback });
+    }
+
+    function removeListeners() {
+        for (var i = 0; i < state.listeners.length; i++) {
+            var l = state.listeners[i];
             try {
-                var data = JSON.parse(text);
-                var list = data.sources || data;
-                if (Object.prototype.toString.call(list) !== '[object Array]') throw new Error('bad format');
-                var out = [];
-                for (var i = 0; i < list.length && out.length < MAX_SOURCES; i++) {
-                    var src = cleanSource(list[i], i);
-                    if (src) out.push(src);
-                }
-                sources = out;
-                saveAndRefresh();
-                notify('Настройки импортированы');
-            } catch (e) {
-                notify('Не удалось импортировать JSON');
-            }
-        });
+                if (l.target.remove) l.target.remove(l.event, l.callback);
+            } catch (e) {}
+        }
+        state.listeners = [];
     }
 
-    function resetConfig() {
-        choose('Сбросить настройки EN Sources?', [
-            { title: 'Да, сбросить', yes: true },
-            { title: 'Отмена', no: true }
-        ], function (a, controller) {
-            if (a.yes) {
-                setBool(K.enabled, false);
-                setBool(K.head, true);
-                setBool(K.merge, true);
-                setBool(K.fallback, true);
-                setBool(K.movies, true);
-                setBool(K.tv, true);
-                setBool(K.anime, true);
-                setBool(K.notify, false);
-                try {
-                    Lampa.Storage.set(K.audio, 'prefer');
-                    Lampa.Storage.set(K.timeout, '20');
-                    Lampa.Storage.set(K.proxy, '');
-                } catch (e) {}
-                sources = defaultSources();
-                saveSources();
-                readConfig();
-                updateHead();
-                refreshSettings();
-                notify('EN Sources сброшены');
-            }
-            restoreController(controller);
-        });
+    function onStorageChange(event) {
+        if (!event || !event.name) return;
+        if (event.name.indexOf(PREFIX) === 0) readConfig();
     }
 
-    function registerSettings() {
-        Lampa.Lang.add({
-            en_sources_v2_title: L('EN Sources', 'EN Sources', 'EN Sources'),
-            en_sources_v2_enabled: L('Зарубежные источники', 'Foreign sources', 'Зарубіжні джерела'),
-            en_sources_v2_enabled_descr: L('ВКЛ — добавлять ваши зарубежные источники; ВЫКЛ — только стандартный поиск Lampa.', 'ON — add your foreign sources; OFF — standard Lampa search only.', 'УВІМК — додавати ваші зарубіжні джерела; ВИМК — лише стандартний пошук Lampa.'),
-            en_sources_v2_head: L('Переключатель в шапке', 'Header toggle', 'Перемикач у шапці'),
-            en_sources_v2_head_descr: L('Показывать кнопку EN в интерфейсе Lampa.', 'Show the EN button in the Lampa header.', 'Показувати кнопку EN в інтерфейсі Lampa.'),
-            en_sources_v2_merge: L('Объединять со стандартными', 'Merge with standard results', 'Об’єднувати зі стандартними'),
-            en_sources_v2_merge_descr: L('Добавлять результаты к стандартному парсеру Lampa.', 'Append results to the standard Lampa parser.', 'Додавати результати до стандартного парсера Lampa.'),
-            en_sources_v2_fallback: L('Откат к стандартному поиску', 'Fallback to standard search', 'Відкат до стандартного пошуку'),
-            en_sources_v2_fallback_descr: L('Если зарубежные источники ничего не нашли в режиме замены.', 'If foreign sources find nothing in replace mode.', 'Якщо зарубіжні джерела нічого не знайшли в режимі заміни.'),
-            en_sources_v2_audio: L('Английская дорожка', 'English audio', 'Англійська доріжка'),
-            en_sources_v2_audio_prefer: L('Предпочитать EN', 'Prefer EN', 'Надавати перевагу EN'),
-            en_sources_v2_audio_strict: L('Только подтверждённый EN', 'Confirmed EN only', 'Лише підтверджений EN'),
-            en_sources_v2_audio_all: L('Не фильтровать', 'Do not filter', 'Не фільтрувати'),
-            en_sources_v2_audio_descr: L('Строгий режим требует метаданные языка; неизвестные раздачи скрываются.', 'Strict mode requires language metadata; unknown releases are hidden.', 'Суворий режим потребує метадані мови; невідомі роздачі приховуються.'),
-            en_sources_v2_movies: L('Фильмы', 'Movies', 'Фільми'),
-            en_sources_v2_tv: L('Сериалы', 'TV series', 'Серіали'),
-            en_sources_v2_anime: L('Аниме', 'Anime', 'Аніме'),
-            en_sources_v2_timeout: L('Таймаут источника', 'Source timeout', 'Таймаут джерела'),
-            en_sources_v2_proxy: L('CORS-прокси', 'CORS proxy', 'CORS-проксі'),
-            en_sources_v2_proxy_descr: L('Необязательно. Поддержка {url}. Не передавайте API-ключи через публичный прокси.', 'Optional. Supports {url}. Do not send API keys through a public proxy.', 'Необов’язково. Підтримка {url}. Не передавайте API-ключі через публічний проксі.'),
-            en_sources_v2_notify: L('Уведомлять об ошибках', 'Notify about errors', 'Повідомляти про помилки'),
-            en_sources_v2_sources: L('Источники', 'Sources', 'Джерела'),
-            en_sources_v2_add: L('Добавить источник', 'Add source', 'Додати джерело'),
-            en_sources_v2_test: L('Проверить источники', 'Test sources', 'Перевірити джерела'),
-            en_sources_v2_diag: L('Диагностика', 'Diagnostics', 'Діагностика'),
-            en_sources_v2_export: L('Экспорт настроек', 'Export settings', 'Експорт налаштувань'),
-            en_sources_v2_import: L('Импорт настроек', 'Import settings', 'Імпорт налаштувань'),
-            en_sources_v2_reset: L('Сбросить настройки', 'Reset settings', 'Скинути налаштування'),
-            en_sources_v2_status: L('Состояние', 'Status', 'Стан')
-        });
-
-        var hasComponentApi = !!(Lampa.SettingsApi && Lampa.SettingsApi.addComponent);
+    function neutralizeOld() {
         try {
-            if (hasComponentApi) {
-                Lampa.SettingsApi.addComponent({
-                    component: COMPONENT,
-                    name: T('en_sources_v2_title'),
-                    icon: ICON
-                });
-            } else {
-                Lampa.Template.add('settings_' + COMPONENT, '<div></div>');
-            }
-        } catch (e) { warn('addComponent', e); }
-
-        if (!hasComponentApi && $) {
-            follow(Lampa.Settings.listener, 'open', function (e) {
-                if (!e || e.name !== 'main' || !e.body) return;
-                var list = e.body.find('.scroll__body > div').first();
-                if (!list.length) list = e.body;
-                if (list.find('[data-component="' + COMPONENT + '"]').length) return;
-                var folder = $('<div class="settings-folder selector" data-component="' + COMPONENT + '">' +
-                    '<div class="settings-folder__icon">' + ICON + '</div>' +
-                    '<div class="settings-folder__name">' + esc(T('en_sources_v2_title')) + '</div></div>');
-                folder.on('hover:enter', function () {
-                    try { Lampa.Settings.create(COMPONENT); } catch (err) { warn('Settings.create', err); }
-                });
-                list.append(folder);
-            });
-        }
-
-        function param(name, type, def, title, descr, onChange, values) {
-            var p = { name: PREFIX + name, type: type };
-            if (typeof def !== 'undefined') p['default'] = def;
-            if (values) p.values = values;
-            var data = {
-                component: COMPONENT,
-                param: p,
-                field: { name: title, description: descr || '' }
-            };
-            if (onChange) data.onChange = onChange;
-            try { Lampa.SettingsApi.addParam(data); } catch (e) { warn('addParam ' + name, e); }
-        }
-
-        function trigger(name, def, title, descr, onChange) {
-            param(name, 'trigger', def, title, descr, onChange);
-        }
-
-        function button(name, title, descr, onChange) {
-            param(name, 'button', undefined, title, descr, onChange);
-        }
-
-        param('section_main', 'title', undefined, T('en_sources_v2_title'), '');
-        trigger('enabled', false, T('en_sources_v2_enabled'), T('en_sources_v2_enabled_descr'), function () {
-            readConfig();
-            updateHead();
-        });
-        trigger('head', true, T('en_sources_v2_head'), T('en_sources_v2_head_descr'), function () {
-            readConfig();
-            if (cfg.head) addHead(); else removeHead();
-        });
-        trigger('merge', true, T('en_sources_v2_merge'), T('en_sources_v2_merge_descr'));
-        trigger('fallback', true, T('en_sources_v2_fallback'), T('en_sources_v2_fallback_descr'));
-        param('audio', 'select', 'prefer', T('en_sources_v2_audio'), T('en_sources_v2_audio_descr'), function () { readConfig(); }, {
-            prefer: T('en_sources_v2_audio_prefer'),
-            strict: T('en_sources_v2_audio_strict'),
-            all: T('en_sources_v2_audio_all')
-        });
-        trigger('movies', true, T('en_sources_v2_movies'), '');
-        trigger('tv', true, T('en_sources_v2_tv'), '');
-        trigger('anime', true, T('en_sources_v2_anime'), '');
-        param('timeout', 'select', '20', T('en_sources_v2_timeout'), '', function () { readConfig(); }, {
-            '10': '10 сек', '15': '15 сек', '20': '20 сек', '30': '30 сек'
-        });
-        param('proxy', 'input', '', T('en_sources_v2_proxy'), T('en_sources_v2_proxy_descr'), function () { readConfig(); });
-        trigger('notify', false, T('en_sources_v2_notify'), '');
-
-        param('section_sources', 'title', undefined, T('en_sources_v2_sources'), '');
-        button('add_source', T('en_sources_v2_add'), '', addSource);
-
-        for (var i = 0; i < MAX_SOURCES; i++) {
-            (function (index) {
-                var data = {
-                    component: COMPONENT,
-                    param: { name: PREFIX + 'source_' + index, type: 'button' },
-                    field: { name: 'Источник ' + (index + 1), description: ' ' },
-                    onRender: function (item) {
-                        var src = sources[index];
-                        if (!src) {
-                            item.addClass('hide');
-                            return;
-                        }
-                        item.removeClass('hide');
-                        item.find('.settings-param__name').text((src.enabled ? '● ' : '○ ') + src.name);
-                        item.find('.settings-param__descr').text(sourceSubtitle(src));
-                    },
-                    onChange: function () { sourceMenu(index); }
-                };
-                try { Lampa.SettingsApi.addParam(data); } catch (e) { warn('source slot', e); }
-            })(i);
-        }
-
-        button('test_all', T('en_sources_v2_test'), '', testAll);
-        button('diagnostics', T('en_sources_v2_diag'), '', function () { showDiagnostics(null); });
-        button('export', T('en_sources_v2_export'), '', exportConfig);
-        button('import', T('en_sources_v2_import'), '', importConfig);
-        button('reset', T('en_sources_v2_reset'), '', resetConfig);
-
-        try {
-            Lampa.SettingsApi.addParam({
-                component: COMPONENT,
-                param: { name: PREFIX + 'status', type: 'static' },
-                field: { name: T('en_sources_v2_status'), description: ' ' },
-                onRender: function (item) {
-                    var enabled = 0;
-                    for (var i = 0; i < sources.length; i++) if (sources[i].enabled) enabled++;
-                    var text = 'v' + VERSION + ' · ядро ' + coreVersion() + ' · ' + (state.hooked ? 'поиск подключён' : 'ожидание парсера') + ' · источников ' + enabled + '/' + sources.length;
-                    item.find('.settings-param__descr').text(text);
-                }
-            });
+            Lampa.Storage.set('en_sources_v2_enabled', false);
+            Lampa.Storage.set('en_pub_enabled', false);
         } catch (e) {}
-
-        follow(Lampa.Settings.listener, 'open', function (e) {
-            state.settingsName = e.name || '';
-            if (e.name === 'parser' && e.body && e.body.find) {
-                e.body.find('[data-name^="en_sources_"],[data-name^="en_src_"]').not('[data-name^="en_sources_v2_"]').addClass('hide');
-            }
-        });
-        follow(Lampa.Settings.listener, 'close', function () {
-            state.settingsName = '';
-        });
     }
 
-    function onStorageChange(e) {
-        if (!e || !e.name) return;
-        if (e.name === K.enabled) {
+    function addStyle() {
+        if (document.getElementById('en-sources-v3-style')) return;
+        var style = document.createElement('style');
+        style.id = 'en-sources-v3-style';
+        style.type = 'text/css';
+        style.appendChild(document.createTextNode([
+            '.en-src-modal{max-height:62vh;overflow:auto;line-height:1.55;padding-right:.4em}',
+            '.en-src-modal h3{margin:.6em 0 .35em;color:#5eead4;font-size:1.05em}',
+            '.en-src-modal p{margin:.3em 0;color:#e2e8f0}',
+            '.en-src-modal b{color:#f8fafc}',
+            '.en-src-modal::-webkit-scrollbar{width:8px}',
+            '.en-src-modal::-webkit-scrollbar-thumb{background:#14b8a6;border-radius:8px}'
+        ].join('\n')));
+        (document.head || document.documentElement).appendChild(style);
+    }
+
+    function init() {
+        if (state.started || state.destroyed) return;
+        state.started = true;
+
+        try {
             readConfig();
-            updateHead();
-            refreshSettings();
-        } else if (e.name === K.head) {
-            readConfig();
-            if (cfg.head) addHead(); else removeHead();
+            addStyle();
+            neutralizeOld();
+            registerSettings();
+            if (!state.settings) {
+                setTimeout(function () {
+                    if (!state.settings && !state.destroyed) registerSettings();
+                }, 1500);
+            }
+
+            var parserOk = wrapParser();
+            var sortOk = wrapSort();
+            if (!parserOk || !sortOk) {
+                var tries = 0;
+                state.hookTimer = setInterval(function () {
+                    tries++;
+                    if (state.destroyed) {
+                        clearInterval(state.hookTimer);
+                        state.hookTimer = null;
+                        return;
+                    }
+                    if (!state.hooked) wrapParser();
+                    if (!state.sortWrapped) wrapSort();
+                    if ((state.hooked && state.sortWrapped) || tries >= 240) {
+                        clearInterval(state.hookTimer);
+                        state.hookTimer = null;
+                        if (!state.hooked) {
+                            api.status = 'parser-unavailable';
+                            warn('Lampa.Parser.get не найден; поиск не перехвачен');
+                        }
+                    }
+                }, 500);
+            }
+
+            try {
+                if (Lampa.Storage && Lampa.Storage.listener) {
+                    follow(Lampa.Storage.listener, 'change', onStorageChange);
+                }
+            } catch (e) {}
+
+            api.status = state.hooked ? 'ready' : 'waiting-parser';
+            log('загружен; ядро:', coreVersion(), '; перехват:', state.hooked);
+        } catch (e) {
+            api.status = 'error';
+            warn('init', e);
         }
     }
 
@@ -1569,731 +1727,88 @@
         if (state.destroyed) return;
         state.destroyed = true;
         api.status = 'destroyed';
-        cancelSearches();
-        clearInterval(state.hookTimer);
+
+        cancelAll();
         clearInterval(state.bootTimer);
+        clearInterval(state.hookTimer);
         removeListeners();
-        removeHead();
+
         try {
-            if (state.hooked && Lampa.Parser) {
+            if (state.hooked && window.Lampa && Lampa.Parser) {
                 Lampa.Parser.get = state.originalGet;
                 Lampa.Parser.clear = state.originalClear;
-                delete Lampa.Parser.__en_sources_v2;
+                delete Lampa.Parser.__en_sources_v3;
             }
         } catch (e) {}
+
         try {
-            if (state.originalTorrents && Lampa.Component && Lampa.Component.add) Lampa.Component.add('torrents', state.originalTorrents);
+            if (state.originalTorrents && Lampa.Component && Lampa.Component.add) {
+                Lampa.Component.add('torrents', state.originalTorrents);
+            }
         } catch (e) {}
+
         try {
-            var style = document.getElementById('en-sources-v2-style');
+            var style = document.getElementById('en-sources-v3-style');
             if (style && style.parentNode) style.parentNode.removeChild(style);
         } catch (e) {}
+
         try {
-            if (Lampa.SettingsApi && Lampa.SettingsApi.removeComponent) Lampa.SettingsApi.removeComponent(COMPONENT);
+            if (Lampa.SettingsApi && Lampa.SettingsApi.removeComponent) {
+                Lampa.SettingsApi.removeComponent(COMPONENT);
+            }
         } catch (e) {}
     }
 
     api.destroy = destroy;
-
-    function init() {
-        if (state.destroyed || api.status === 'ready') return;
-        try {
-            $ = window.jQuery || window.$;
-            readConfig();
-            loadSources();
-            addStyle();
-            registerSettings();
-            addHead();
-            follow(Lampa.Storage.listener, 'change', onStorageChange);
-            follow(Lampa.Listener, 'torrent', onTorrentRender);
-            wrapTorrentComponent();
-
-            if (!wrapParser()) {
-                var tries = 0;
-                state.hookTimer = setInterval(function () {
-                    tries++;
-                    if (wrapParser() || tries >= 120 || state.destroyed) {
-                        clearInterval(state.hookTimer);
-                        state.hookTimer = null;
-                        if (!state.hooked) {
-                            api.status = 'parser-unavailable';
-                            warn('Lampa.Parser.get не найден. Настройки доступны, поиск не перехвачен.');
-                        }
-                    }
-                }, 500);
-            }
-
-            window.en_sources_plugin = true;
-            api.status = state.hooked ? 'ready' : 'waiting-parser';
-            log('Загружен. Раздел настроек: EN Sources. Кнопка в шапке:', cfg.head ? 'включена' : 'выключена');
-        } catch (e) {
-            api.status = 'error';
-            warn('init', e);
-        }
-    }
+    api._test = {
+        parseNyaa: parseNyaa,
+        parseNyaaHtml: parseNyaaHtml,
+        parseSize: parseSize,
+        bytesText: bytesText,
+        parseTime: parseTime,
+        normalizeImdb: normalizeImdb,
+        magnetFor: magnetFor,
+        audioState: audioState,
+        baseQueries: baseQueries,
+        isAnimeCard: isAnimeCard,
+        cleanQuery: cleanQuery
+    };
 
     function boot() {
         if (state.destroyed) return;
-        if (window.appready && window.Lampa) {
+
+        if (window.appready && window.Lampa && Lampa.Parser) {
             init();
             return;
         }
-        if (window.Lampa && Lampa.Listener && Lampa.Listener.follow) {
-            follow(Lampa.Listener, 'app', function (e) {
-                if (e && e.type === 'ready') init();
-            });
-        }
-        var waited = 0;
+
+        try {
+            if (window.Lampa && Lampa.Listener && Lampa.Listener.follow) {
+                Lampa.Listener.follow('app', function (event) {
+                    if (event && event.type === 'ready') init();
+                });
+            }
+        } catch (e) {}
+
+        var tries = 0;
         state.bootTimer = setInterval(function () {
-            waited++;
-            if (state.destroyed) { clearInterval(state.bootTimer); return; }
-            if (window.appready && window.Lampa) {
+            tries++;
+            if (state.destroyed) {
+                clearInterval(state.bootTimer);
+                state.bootTimer = null;
+                return;
+            }
+            if (window.appready && window.Lampa && Lampa.Parser) {
                 clearInterval(state.bootTimer);
                 state.bootTimer = null;
                 init();
-            } else if (waited >= 120) {
+            } else if (tries >= 240) {
                 clearInterval(state.bootTimer);
                 state.bootTimer = null;
-                warn('Lampa не инициализировалась за 60 секунд.');
+                warn('Lampa не инициализировалась за 120 секунд');
             }
         }, 500);
     }
 
-    boot();
+    if (!window.__EN_SOURCES_TEST__) boot();
 })(window, document);
-/*!
- * EN Sources 2.13.0 — модуль публичных трекеров (хвост единого файла)
- * ВСТАВКА: после строки })(window, document); первого модуля.
- * БЕЗ ПРОКСИ. Nyaa для сериалов: HTML-пагинация по новизне (3 страницы)
- * без RSS fallback + сезонные паки. Для фильмов: HTML + RSS(limit=150, id).
- * Общий рубильник EN в шапке + под-тумблер публичных.
- * search_two -> Shikimori -> AniList, кэш. Cloudflare/UA/regex-fallback.
- */
-(function () {
-    'use strict';
-    if (window.en_public_plugin) return;
-    window.en_public_plugin = true;
-
-    var PREFIX = 'en_pub_';
-    var MAX_RESULTS = 250;
-    var UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-    var SOURCES = [
-        { id: 'torrentio', title: 'Torrentio',      def: true  },
-        { id: 'nyaa',      title: 'Nyaa.si',        def: true  },
-        { id: 'anidex',    title: 'AniDex',         def: false },
-        { id: 'yts',       title: 'YTS',            def: true  },
-        { id: 'eztv',      title: 'EZTV',           def: true  },
-        { id: 'tg',        title: 'TorrentGalaxy',  def: true  },
-        { id: 'tpb',       title: 'The Pirate Bay', def: true  }
-    ];
-    var YTS_HOSTS = ['yts.mx', 'yts.rs', 'yts.ag', 'yts.lt'];
-    var EZTV_HOSTS = ['eztvx.to', 'eztv.re', 'eztv.ch'];
-    var TPB_HOSTS = ['apibay.org'];
-    var RU_AUDIO_RE = /(rus|russian|русск|рус\.)[^\n]{0,45}(dub|dubbed|dubbing|audio|mvo|\bvo\b|озвуч|дубл|закадр)|(dub|dubbed|dubbing|audio|mvo|\bvo\b|озвуч|дубл|закадр)[^\n]{0,45}(rus|russian|русск|рус\.)/i;
-    var RU_GROUP_RE = /(lostfilm|newstudio|alexfilm|jaskier|cube77|hamster|baibako|coldfilm|amedia|levelin|omskbird|viruseproject|гоблин|кураж|сербин|паровоз|кубик)/i;
-    var EN_RE = /\b(english|eng|multisub|multi-sub|multi|erai-raws|subsplease|horriblesubs|crunchyroll)\b|cr web|\[multi/i;
-    var DUB_RE = /\b(dub|dubbed|dual[ .-]?audio|english[ .-]?dub|eng[ .-]?dub)\b/i;
-    var CJK_RE = /[\u3000-\u9fff\uff00-\uffef]/;
-    var LAST = { counts: {}, errors: {}, time: 0, text: 'Проверка ещё не запускалась' };
-    window.__en_pub_last = LAST;
-    var registered = false, sortWrapped = false, clearHooked = false, clearTime = 0;
-    var deliveredByCard = {};
-    var resolveCache = {};
-
-    function truthy(v) { return v === true || v === 'true' || v === 1 || v === '1'; }
-    function globalEn() { return truthy(Lampa.Storage.get('en_sources_v2_enabled', true)); }
-    function enabled() { return truthy(Lampa.Storage.get(PREFIX + 'enabled', true)) && globalEn(); }
-    function showRu() { return truthy(Lampa.Storage.get(PREFIX + 'ru', false)); }
-    function dubMode() { var v = String(Lampa.Storage.get(PREFIX + 'dub', 'prefer') || 'prefer'); return (v === 'off' || v === 'only') ? v : 'prefer'; }
-    function isRuAudio(t) { t = String(t || ''); return RU_AUDIO_RE.test(t) || RU_GROUP_RE.test(t); }
-    function passLang(t) { return showRu() || !isRuAudio(t); }
-    function passDub(t) { return dubMode() !== 'only' || DUB_RE.test(String(t || '')); }
-    function srcOn(id) {
-        var def = true, i;
-        for (i = 0; i < SOURCES.length; i++) if (SOURCES[i].id === id) def = SOURCES[i].def;
-        var v = Lampa.Storage.get(PREFIX + 'src_' + id);
-        return v === undefined || v === null ? def : truthy(v);
-    }
-    function clean(v) { return String(v == null ? '' : v).replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, ''); }
-    function cleanQuery(v) {
-        var s = clean(v);
-        s = s.replace(/\s+\((?:TV|Movie|OVA|ONA|Special)\)\s*$/i, '');
-        s = s.replace(/\s+\((?:19|20)\d{2}\)\s*$/, '');
-        s = s.replace(/\s+\[(?:19|20)\d{2}\]\s*$/, '');
-        s = s.replace(/^[\-–—:;,. ]+|[\-–—:;,. ]+$/g, '');
-        return clean(s);
-    }
-    function pushQuery(list, v) {
-        var q = cleanQuery(v);
-        if (!q || q.length < 2) return;
-        var k = q.toLowerCase();
-        for (var i = 0; i < list.length; i++) if (list[i].toLowerCase() === k) return;
-        list.push(q);
-    }
-    function queryScore(q) { if (CJK_RE.test(q)) return 1; if (/[А-Яа-яЁё]/.test(q)) return 2; return 0; }
-    function baseQueries(o) {
-        o = o || {}; var m = o.movie || {}; var out = [];
-        pushQuery(out, o.search_two);
-        pushQuery(out, m.original_title);
-        pushQuery(out, m.original_name);
-        pushQuery(out, m.title);
-        pushQuery(out, m.name);
-        pushQuery(out, o.search);
-        return out;
-    }
-    function isAnimeCard(o) {
-        if (!o) return false;
-        var m = o.movie || {};
-        var g = m.genres || [], anim = false, i;
-        for (i = 0; i < g.length; i++) { var x = g[i]; if ((x && typeof x === 'object' && x.id == 16) || x == 16) anim = true; }
-        var lang = String(m.original_language || '').toLowerCase();
-        if (anim && (lang === 'ja' || lang === 'zh')) return true;
-        if (CJK_RE.test(m.original_name) || CJK_RE.test(m.original_title)) return true;
-        return false;
-    }
-    function cardKey(o) {
-        var m = (o && o.movie) || {};
-        return String(m.id || '') + ':' + (m.number_of_seasons || m.original_name ? 'tv' : 'movie') + ':' + String(m.original_title || m.original_name || m.title || '');
-    }
-    function isAndroid() {
-        try { if (window.AndroidJS && Lampa.Platform && Lampa.Platform.is) return !!Lampa.Platform.is('android'); } catch (e) {}
-        return false;
-    }
-    function isCloudflare(t) { return /just a moment|cf-browser-verification|enable javascript and cookies|attention required/i.test(String(t || '').slice(0, 3000)); }
-    function looksJson(t) { var s = String(t || '').replace(/^\uFEFF/, '').replace(/^\s+/, ''); return s.charAt(0) === '{' || s.charAt(0) === '['; }
-    function looksNyaaRss(t) { return /<rss[\s>]|<item[\s>]/i.test(String(t || '')); }
-
-    function fetchText(url, cb, validator) {
-        var n = new Lampa.Reguest(); n.timeout(15000);
-        var params = { dataType: 'text', headers: { 'Accept': 'text/xml,application/xml,text/html,*/*' } };
-        if (isAndroid()) { params.headers['User-Agent'] = UA; params.headers['Accept-Language'] = 'en-US,en;q=0.9,ru;q=0.8'; }
-        n.native(url, function (s) {
-            if (!s || isCloudflare(s) || (validator && !validator(s))) { cb(null); return; }
-            cb(s);
-        }, function () { cb(null); }, false, params);
-    }
-    function fetchJson(url, cb) {
-        fetchText(url, function (t) {
-            if (!t) { cb(null); return; }
-            try { cb(JSON.parse(String(t).replace(/^\uFEFF/, ''))); } catch (e) { cb(null); }
-        }, looksJson);
-    }
-    function postJson(url, body, cb) {
-        var n = new Lampa.Reguest(); n.timeout(12000);
-        var headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
-        if (isAndroid()) headers['User-Agent'] = UA;
-        n.native(url, function (j) { cb(j && typeof j === 'object' ? j : null); }, function () { cb(null); }, body, { dataType: 'json', headers: headers });
-    }
-    function mirrorJson(hosts, path, cb, valid) {
-        var i = 0;
-        function next() {
-            if (i >= hosts.length) { cb(null); return; }
-            fetchJson('https://' + hosts[i++] + path, function (j) { if (j && (!valid || valid(j))) cb(j); else next(); });
-        }
-        next();
-    }
-    function shikimoriTitles(q, cb) {
-        fetchJson('https://shikimori.io/api/animes?search=' + encodeURIComponent(q) + '&limit=5', function (j) {
-            var out = [];
-            if (j && j.length) for (var i = 0; i < j.length; i++) { var a = j[i] || {}; if (a.name) out.push(a.name); if (a.english) out.push(a.english); }
-            cb(out);
-        });
-    }
-    function anilistTitles(q, cb) {
-        var body = JSON.stringify({ query: 'query($s:String){Page(perPage:3){media(search:$s,type:ANIME){title{romaji english} synonyms}}}', variables: { s: q } });
-        postJson('https://graphql.anilist.co', body, function (j) {
-            var out = [];
-            try {
-                var ms = j.data.Page.media || [];
-                for (var i = 0; i < ms.length; i++) {
-                    var t = ms[i].title || {};
-                    if (t.romaji) out.push(t.romaji);
-                    if (t.english) out.push(t.english);
-                    var syn = ms[i].synonyms || [];
-                    for (var k = 0; k < syn.length; k++) out.push(syn[k]);
-                }
-            } catch (e) {}
-            cb(out);
-        });
-    }
-    function resolveTitles(base, cb) {
-        if (!base.length) { cb([]); return; }
-        var key = base.join('|').toLowerCase();
-        var c = resolveCache[key];
-        if (c && Date.now() - c.time < (c.titles.length ? 3600000 : 300000)) { cb(c.titles); return; }
-        var done = false;
-        var timer = setTimeout(function () { if (!done) { done = true; cb([]); } }, 8500);
-        function fin(t) {
-            if (done) return; done = true; clearTimeout(timer);
-            var out = []; for (var i = 0; i < t.length; i++) pushQuery(out, t[i]);
-            resolveCache[key] = { time: Date.now(), titles: out };
-            cb(out);
-        }
-        shikimoriTitles(base[0], function (t) { if (t && t.length) fin(t); else anilistTitles(base[0], function (m) { fin(m || []); }); });
-    }
-    function buildQueries(o, cb) {
-        var base = baseQueries(o);
-        if (!isAnimeCard(o) || !base.length) { cb(base.slice().sort(function (a, b) { return queryScore(a) - queryScore(b); })); return; }
-        resolveTitles(base, function (t) {
-            var out = []; pushQuery(out, base[0]);
-            for (var i = 0; i < t.length; i++) pushQuery(out, t[i]);
-            for (var j = 1; j < base.length; j++) pushQuery(out, base[j]);
-            out = out.slice(0, 6).sort(function (a, b) { return queryScore(a) - queryScore(b); });
-            cb(out.length ? out : base);
-        });
-    }
-    function parseSize(str) {
-        if (str == null) return 0;
-        if (typeof str === 'number') return str;
-        var m = String(str).replace(',', '.').match(/([\d.]+)\s*([KMGT])?i?B/i);
-        if (!m) return 0;
-        var n = parseFloat(m[1]); if (isNaN(n)) return 0;
-        var mult = { k: 1024, m: 1048576, g: 1073741824, t: 1099511627776 };
-        return Math.round(n * (mult[(m[2] || '').toLowerCase()] || 1));
-    }
-    function audioState(t) {
-        t = String(t || '');
-        if (isRuAudio(t)) return false;
-        if (DUB_RE.test(t) || EN_RE.test(t)) return true;
-        return null;
-    }
-    function magnetFor(hash, title) {
-        var tr = ['http://nyaa.tracker.wf:7777/announce', 'udp://open.stealth.si:80/announce', 'udp://tracker.opentrackr.org:1337/announce', 'udp://exodus.desync.com:6969/announce', 'udp://tracker.torrent.eu.org:451/announce'];
-        var u = 'magnet:?xt=urn:btih:' + hash + '&dn=' + encodeURIComponent(title || '');
-        for (var i = 0; i < tr.length; i++) u += '&tr=' + encodeURIComponent(tr[i]);
-        return u;
-    }
-    function makeItem(o) {
-        var hash = String(o.hash || '').toLowerCase();
-        if (!hash) { var hm = String(o.magnet || '').match(/btih:([a-fA-F0-9]{40})/i); if (hm) hash = hm[1].toLowerCase(); }
-        var size = typeof o.size === 'number' ? o.size : parseSize(o.size);
-        var date = o.date ? new Date(o.date).getTime() : Date.now();
-        if (isNaN(date)) date = Date.now();
-        var human = '';
-        try { if (Lampa.Utils && Lampa.Utils.bytesToSize) human = Lampa.Utils.bytesToSize(size); } catch (e) {}
-        if (!human && size) human = (size / 1073741824).toFixed(2) + ' ГБ';
-        var t = o.title || 'Unknown';
-        return {
-            Title: t, Tracker: o.tracker || 'EN',
-            Seeders: parseInt(o.seeds, 10) || 0, Peers: parseInt(o.peers, 10) || 0,
-            Size: size, size: human, MagnetUri: o.magnet || '', Link: o.link || o.magnet || '',
-            PublishDate: date, PublisTime: date, hash: hash || o.magnet || t,
-            en_public: true, en_sources_v2: true, en_source_name: o.tracker || 'EN',
-            en_audio: audioState(t), en_dub: DUB_RE.test(t)
-        };
-    }
-    function dedupeItems(arr) {
-        var map = {}, out = [], i, k, prev;
-        for (i = 0; i < arr.length; i++) {
-            if (!arr[i]) continue;
-            k = String(arr[i].hash || arr[i].MagnetUri || arr[i].Title || i);
-            prev = map[k];
-            if (!prev) { map[k] = arr[i]; out.push(arr[i]); }
-            else if ((arr[i].Seeders || 0) > (prev.Seeders || 0)) { var idx = out.indexOf(prev); if (idx >= 0) out[idx] = arr[i]; map[k] = arr[i]; }
-        }
-        return out;
-    }
-    function decodeXml(v) {
-        return String(v == null ? '' : v)
-            .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
-            .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&apos;/g, "'").replace(/&amp;/g, '&');
-    }
-    function xmlText(node, name) {
-        var all = node.getElementsByTagName('*'), i, ln;
-        for (i = 0; i < all.length; i++) {
-            ln = all[i].localName || String(all[i].nodeName || '').split(':').pop();
-            if (ln === name) return clean(all[i].textContent || all[i].text || '');
-        }
-        return '';
-    }
-    function nyaaItemFrom(raw) {
-        var hash = String(raw.hash || '').toLowerCase();
-        if (!/^[a-f0-9]{40}$/.test(hash)) return null;
-        var title = clean(raw.title); if (!title) return null;
-        return makeItem({
-            title: title, tracker: 'Nyaa', seeds: raw.seeders, peers: raw.leechers,
-            size: parseSize(raw.size), date: raw.date, hash: hash,
-            magnet: magnetFor(hash, title),
-            link: raw.id ? ('https://nyaa.si/download/' + raw.id + '.torrent') : ''
-        });
-    }
-    function parseNyaaDom(str) {
-        if (!str || typeof DOMParser === 'undefined') return null;
-        try {
-            var doc = new DOMParser().parseFromString(str, 'text/xml');
-            if (!doc || doc.getElementsByTagName('parsererror').length) return null;
-            var nodes = doc.getElementsByTagName('item'); if (!nodes || !nodes.length) return null;
-            var out = [];
-            for (var i = 0; i < nodes.length; i++) {
-                var guid = xmlText(nodes[i], 'guid'); var idm = guid.match(/\/view\/(\d+)/);
-                var it = nyaaItemFrom({ title: xmlText(nodes[i], 'title'), hash: xmlText(nodes[i], 'infoHash'), seeders: xmlText(nodes[i], 'seeders'), leechers: xmlText(nodes[i], 'leechers'), size: xmlText(nodes[i], 'size'), date: xmlText(nodes[i], 'pubDate'), id: idm ? idm[1] : '' });
-                if (it) out.push(it);
-            }
-            return out.length ? out : null;
-        } catch (e) { return null; }
-    }
-    function parseNyaaRegex(str) {
-        var out = []; var items = String(str || '').match(/<item\b[\s\S]*?<\/item>/gi); if (!items) return out;
-        function tag(b, n) {
-            var m = b.match(new RegExp('<' + n + '\\b[^>]*>([\\s\\S]*?)<\\/' + n + '>', 'i'));
-            if (!m) m = b.match(new RegExp('<[\\w.-]+:' + n + '\\b[^>]*>([\\s\\S]*?)<\\/[\\w.-]+:' + n + '>', 'i'));
-            return m ? decodeXml(m[1]) : '';
-        }
-        for (var i = 0; i < items.length; i++) {
-            var guid = tag(items[i], 'guid'); var idm = guid.match(/\/view\/(\d+)/);
-            var it = nyaaItemFrom({ title: tag(items[i], 'title'), hash: tag(items[i], 'infoHash'), seeders: tag(items[i], 'seeders'), leechers: tag(items[i], 'leechers'), size: tag(items[i], 'size'), date: tag(items[i], 'pubDate'), id: idm ? idm[1] : '' });
-            if (it) out.push(it);
-        }
-        return out;
-    }
-    function parseNyaa(str) { var o = parseNyaaDom(str); if (!o || !o.length) o = parseNyaaRegex(str); return o || []; }
-    function parseNyaaHtml(str) {
-        var items = [];
-        if (!str || typeof DOMParser === 'undefined') return items;
-        try {
-            var doc = new DOMParser().parseFromString(str, 'text/html');
-            var rows = doc.querySelectorAll('table.torrent-list tbody tr');
-            if (!rows || !rows.length) {
-                var allTr = doc.getElementsByTagName('tr');
-                var tmp = [];
-                for (var k = 0; k < allTr.length; k++) {
-                    if (allTr[k].querySelector && allTr[k].querySelector('a[href^="magnet:"]')) tmp.push(allTr[k]);
-                }
-                rows = tmp;
-            }
-            for (var i = 0; i < rows.length; i++) {
-                var row = rows[i];
-                var cells = row.querySelectorAll ? row.querySelectorAll('td') : [];
-                if (cells.length < 7) continue;
-                var a = cells[1].querySelector ? (cells[1].querySelector('a[href*="/view/"]') || cells[1].querySelector('a')) : null;
-                var title = a ? clean(a.getAttribute('title') || a.textContent || '') : '';
-                var mag = row.querySelector ? row.querySelector('a[href^="magnet:"]') : null;
-                var magnet = mag ? mag.getAttribute('href') : '';
-                if (!title || !magnet) continue;
-                var hm = magnet.match(/btih:([a-zA-Z0-9]{32,40})/);
-                var idm = (a && a.getAttribute('href') || '').match(/\/view\/(\d+)/);
-                var it = nyaaItemFrom({
-                    title: title, hash: hm ? hm[1] : '',
-                    seeders: cells[5].textContent, peers: cells[6].textContent,
-                    size: cells[3].textContent, date: cells[4].textContent,
-                    id: idm ? idm[1] : ''
-                });
-                if (it) { it.MagnetUri = magnet; items.push(it); }
-            }
-        } catch (e) {}
-        return items;
-    }
-    function nyaaRssUrl(q, cat, sort, limit) { return 'https://nyaa.si/?page=rss&c=' + cat + '&s=' + sort + '&o=desc&limit=' + (limit || 75) + '&q=' + encodeURIComponent(q); }
-    function nyaaHtmlUrl(q, cat, sort, page) { return 'https://nyaa.si/?f=0&c=' + cat + '&q=' + encodeURIComponent(q) + '&s=' + sort + '&o=desc&p=' + page; }
-
-    function nyaaSearch(cands, dm, isSeries, seasonNum, cb) {
-        var ci = 0;
-        function tryCandidate(cat) {
-            if (ci >= cands.length) { if (cat === '1_2') { ci = 0; tryCandidate('0_0'); } else cb([]); return; }
-            var qq = cands[ci++]; var acc = [];
-
-            function addSeasonPacks() {
-                if (!isSeries || !seasonNum) { afterPacks(); return; }
-                var sn = ('0' + seasonNum).slice(-2);
-                var packQs = [qq + ' S' + sn, qq + ' season ' + seasonNum, qq + ' batch'];
-                var pi = 0;
-                function nextPack() {
-                    if (pi >= packQs.length) { afterPacks(); return; }
-                    var pq = packQs[pi++];
-                    fetchText(nyaaHtmlUrl(pq, cat, 'id', 1), function (s) {
-                        if (s) acc = acc.concat(parseNyaaHtml(s));
-                        nextPack();
-                    }, function (s) { return s && /torrent-list|magnet:/i.test(s); });
-                }
-                nextPack();
-            }
-
-            function afterPacks() {
-                if (dm !== 'off') {
-                    fetchText(nyaaRssUrl(qq + ' dual audio', cat, 'id', 75), function (s3) {
-                        if (s3) acc = acc.concat(parseNyaa(s3));
-                        cb(dedupeItems(acc));
-                    }, looksNyaaRss);
-                } else cb(dedupeItems(acc));
-            }
-
-            if (isSeries) {
-                var page = 1, MAXP = 3;
-                function nextPage() {
-                    if (page > MAXP) { addSeasonPacks(); return; }
-                    fetchText(nyaaHtmlUrl(qq, cat, 'id', page), function (s) {
-                        if (!s) {
-                            if (page === 1) tryCandidate(cat);
-                            else addSeasonPacks();
-                            return;
-                        }
-                        var r = parseNyaaHtml(s);
-                        if (page === 1 && !r.length) { tryCandidate(cat); return; }
-                        acc = acc.concat(r);
-                        page++;
-                        nextPage();
-                    }, function (s) { return s && /torrent-list|magnet:/i.test(s); });
-                }
-                nextPage();
-            } else {
-                var accMovies = [];
-                fetchText(nyaaHtmlUrl(qq, cat, 'id', 1), function (s) {
-                    if (s) accMovies = accMovies.concat(parseNyaaHtml(s));
-                    fetchText(nyaaRssUrl(qq, cat, 'id', 150), function (rs) {
-                        if (rs) accMovies = accMovies.concat(parseNyaa(rs));
-                        acc = acc.concat(dedupeItems(accMovies));
-                        addSeasonPacks();
-                    }, looksNyaaRss);
-                }, function (s) { return s && /torrent-list|magnet:/i.test(s); });
-            }
-        }
-        tryCandidate('1_2');
-    }
-    function parseAnidex(json) {
-        var items = []; var list = json && (json.length ? json : json.torrents);
-        (list || []).forEach(function (t) {
-            if (!t || !t.magnet) return;
-            items.push(makeItem({ title: t.torrent_name, tracker: 'AniDex' + (t.lang_name ? ' (' + t.lang_name + ')' : ''), seeds: t.seeded, peers: t.leechers, size: parseSize(t.size), date: t.date_uploaded || '', hash: t.hash, magnet: t.magnet }));
-        });
-        return items;
-    }
-    function parseYts(json) {
-        var items = [];
-        if (json && json.data && json.data.movies) json.data.movies.forEach(function (m) {
-            (m.torrents || []).forEach(function (t) {
-                items.push(makeItem({ title: m.title + ' (' + m.year + ') [' + t.quality + '] [' + t.type + '] [YTS]', tracker: 'YTS', seeds: t.seeds, peers: t.peers, size: t.size, date: t.date_uploaded || '', hash: t.hash, magnet: t.url || magnetFor(String(t.hash || '').toLowerCase(), m.title) }));
-            });
-        });
-        return items;
-    }
-    function parseEztv(json, object) {
-        var items = [], m = object.movie || {}; var season = parseInt(m.season_number, 10) || 0;
-        if (json && json.torrents) json.torrents.forEach(function (t) {
-            if (season && parseInt(t.season, 10) !== season) return;
-            var magnet = t.torrent_url && t.torrent_url.indexOf('magnet:') === 0 ? t.torrent_url : magnetFor(String(t.hash || '').toLowerCase(), t.filename || t.title);
-            items.push(makeItem({ title: t.filename || t.title, tracker: 'EZTV', seeds: t.seeds, peers: t.peers, size: parseInt(t.size_bytes, 10) || parseSize(t.small_size), date: t.date_released_unix ? parseInt(t.date_released_unix, 10) * 1000 : '', hash: t.hash, magnet: magnet }));
-        });
-        return items;
-    }
-    function parseTorrentio(json) {
-        var items = [];
-        if (json && json.streams) json.streams.forEach(function (s) {
-            if (!s.infoHash) return;
-            var name = clean(String(s.name || '').replace(/\n/g, ' '));
-            var info = String(s.title || '').replace(/\n/g, ' ');
-            var seeds = info.match(/👤\s*([\d\s.,]+)/) || info.match(/seeds?\s*:?\s*([\d\s.,]+)/i);
-            var size = info.match(/💾\s*([\d.,]+\s*[KMGT]?B)/i) || info.match(/size\s*:?\s*([\d.,]+\s*[KMGT]?B)/i);
-            var src = info.match(/⚙️\s*(.+)$/); var srcs = src ? clean(src[1]) : '';
-            items.push(makeItem({ title: (name ? name + ' ' : '') + (srcs ? '— ' + srcs + ' ' : '') + '[EN]', tracker: srcs ? srcs.split(':')[0] : 'Torrentio', seeds: seeds ? parseInt(seeds[1].replace(/[^\d]/g, ''), 10) : 0, size: parseSize(size ? size[1] : ''), hash: s.infoHash, magnet: 'magnet:?xt=urn:btih:' + s.infoHash + (s.fileIdx !== undefined ? '&so=' + s.fileIdx : '') + '&dn=' + encodeURIComponent(name || 'EN') }));
-        });
-        return items;
-    }
-    function parseTG(str) {
-        var items = [], $ = window.jQuery || window.$;
-        if (!str || !$) return items;
-        try {
-            $(str).find('div.tgxtablerow, div.tgxtablelist').each(function () {
-                var row = $(this);
-                var magnet = row.find('a[href^="magnet:"]').attr('href');
-                var title = clean(row.find('div#click a, a.txlight, div#click').first().text());
-                if (!magnet || !title) return;
-                items.push(makeItem({ title: title, tracker: 'TorrentGalaxy', seeds: row.find('font[color="green"] b, span[title="Seeders"]').first().text(), peers: row.find('font[color="#ff0000"] b, span[title="Leechers"]').first().text(), size: parseSize(row.find('span.badge-secondary').first().text()), magnet: magnet }));
-            });
-        } catch (e) {}
-        return items;
-    }
-    function parseTpb(json) {
-        var items = []; var list = json && json.length ? json : null;
-        (list || []).forEach(function (t) {
-            if (!t || !t.info_hash || /^0+$/.test(String(t.info_hash))) return;
-            items.push(makeItem({ title: t.name, tracker: 'TPB', seeds: t.seeders, peers: t.leechers, size: parseInt(t.size, 10) || 0, date: t.added ? parseInt(t.added, 10) * 1000 : '', hash: t.info_hash, magnet: magnetFor(String(t.info_hash).toLowerCase(), t.name) }));
-        });
-        return items;
-    }
-    function search(object, cb) {
-        buildQueries(object, function (cands) {
-            var movie = object.movie || {};
-            var isSeries = !!movie.number_of_seasons;
-            var q = cands[0] || '';
-            var imdb = String(movie.imdb_id || '');
-            if (/^\d+$/.test(imdb)) imdb = 'tt' + ('0000000' + imdb).slice(-7);
-            if (!/^tt\d{7,10}$/.test(imdb)) imdb = '';
-            var season = parseInt(movie.season_number, 10) || 0;
-            var episode = parseInt(movie.episode_number, 10) || 0;
-            var dm = dubMode();
-            LAST.counts = {}; LAST.errors = {}; LAST.time = Date.now();
-            var tasks = [], items = [], done = 0, finished = false, safety;
-            function fin() { if (finished) return; finished = true; clearTimeout(safety); LAST.text = summary(); cb(items); }
-            function complete(res) {
-                var cleanArr = (res || []).filter(function (it) { return it && passLang(it.Title) && passDub(it.Title); });
-                if (cleanArr.length) items = items.concat(cleanArr);
-                done++; if (done >= tasks.length) fin();
-            }
-            function track(id, fn) {
-                return function (cb2) { fn(function (res) { LAST.counts[id] = (res || []).length; if (!res) LAST.errors[id] = 'сеть/CF'; cb2(res); }); };
-            }
-            if (q) {
-                if (srcOn('nyaa')) tasks.push(track('nyaa', function (c) { nyaaSearch(cands, dm, isSeries, season, c); }));
-                if (srcOn('anidex')) tasks.push(track('anidex', function (c) {
-                    var i = 0;
-                    function next() { if (i >= cands.length) { c([]); return; } var qq = cands[i++]; fetchJson('https://anidex.info/api/?q=' + encodeURIComponent(qq) + '&s=seeders&o=desc', function (j) { var r = parseAnidex(j); if (r.length) c(r); else next(); }); }
-                    next();
-                }));
-                if (!isSeries && srcOn('yts')) tasks.push(track('yts', function (c) {
-                    function byTitle() { mirrorJson(YTS_HOSTS, '/api/v2/list_movies.json?query_term=' + encodeURIComponent(q) + '&limit=50', function (j) { c(parseYts(j)); }, function (j) { return !!j.data; }); }
-                    if (imdb) mirrorJson(YTS_HOSTS, '/api/v2/list_movies.json?query_term=' + imdb + '&limit=50', function (j) { var r = parseYts(j); if (r.length) c(r); else byTitle(); }, function (j) { return !!j.data; });
-                    else byTitle();
-                }));
-                if (srcOn('tg')) tasks.push(track('tg', function (c) { fetchText('https://torrentgalaxy.to/torrents.php?search=' + encodeURIComponent(q) + '&sort=seeders&order=desc', function (s) { c(parseTG(s)); }); }));
-                if (srcOn('tpb')) tasks.push(track('tpb', function (c) { mirrorJson(TPB_HOSTS, '/q.php?q=' + encodeURIComponent(q), function (j) { c(parseTpb(j)); }, function (j) { return !!j.length; }); }));
-            }
-            if (imdb) {
-                if (srcOn('torrentio') && (!isSeries || episode)) tasks.push(track('torrentio', function (c) {
-                    var path = isSeries ? 'series/' + imdb + ':' + (season || 1) + ':' + episode : 'movie/' + imdb;
-                    fetchJson('https://torrentio.strem.fun/qualityfilter=480p,scr,cam,unknown/stream/' + path + '.json', function (j) { c(parseTorrentio(j)); });
-                }));
-                if (isSeries && srcOn('eztv')) tasks.push(track('eztv', function (c) { mirrorJson(EZTV_HOSTS, '/api/get-torrents?imdb_id=' + imdb + '&limit=100', function (j) { c(parseEztv(j, object)); }, function (j) { return !!j.torrents; }); }));
-            }
-            if (!tasks.length) { fin(); return; }
-            safety = setTimeout(fin, 40000);
-            tasks.forEach(function (t) { try { t(complete); } catch (e) { complete(null); } });
-        });
-    }
-    function summary() {
-        var parts = [], i, s, id;
-        for (i = 0; i < SOURCES.length; i++) {
-            s = SOURCES[i]; id = s.id;
-            if (!srcOn(id)) { parts.push(s.title + ': выкл'); continue; }
-            if (LAST.counts[id] !== undefined) { parts.push(s.title + ': ' + LAST.counts[id]); continue; }
-            if (LAST.errors[id]) { parts.push(s.title + ': ' + LAST.errors[id]); continue; }
-            parts.push(s.title + ': не запрашивался');
-        }
-        return parts.join(' · ');
-    }
-    function testPublic() {
-        try { Lampa.Noty.show('Проверяю: фильм, сериал, аниме...'); } catch (e) {}
-        var probes = [
-            { search: 'Inception', movie: { title: 'Inception', original_title: 'Inception', imdb_id: 'tt1375666' } },
-            { search: 'Breaking Bad', movie: { title: 'Breaking Bad', original_name: 'Breaking Bad', number_of_seasons: 5, season_number: 1, episode_number: 1, imdb_id: 'tt0903747' } },
-            { search: 'Frieren', movie: { title: 'Frieren', original_name: '葬送のフリーレン', number_of_seasons: 1, season_number: 1, episode_number: 1, imdb_id: 'tt22248376', original_language: 'ja', genres: [{ id: 16 }] } }
-        ];
-        var merged = { counts: {}, errors: {} }; var idx = 0;
-        function step() {
-            if (idx >= probes.length) {
-                LAST.counts = merged.counts; LAST.errors = merged.errors; LAST.time = Date.now(); LAST.text = summary();
-                console.log('[EN Public] test:', LAST.text);
-                try { Lampa.Noty.show(LAST.text, { time: 12000 }); } catch (e) {}
-                return;
-            }
-            try { Lampa.Noty.show('Проверка ' + (idx + 1) + '/3...'); } catch (e) {}
-            var p = probes[idx++];
-            search(p, function () {
-                for (var i = 0; i < SOURCES.length; i++) {
-                    var id = SOURCES[i].id;
-                    if (LAST.counts[id] !== undefined) merged.counts[id] = Math.max(merged.counts[id] || 0, LAST.counts[id]);
-                    else if (LAST.errors[id] && merged.counts[id] === undefined) merged.errors[id] = LAST.errors[id];
-                }
-                step();
-            });
-        }
-        step();
-    }
-    function register() {
-        if (registered) return true;
-        if (!window.Lampa || !Lampa.SettingsApi || !Lampa.SettingsApi.addParam) return false;
-        function add(param, field, onChange, onRender) {
-            var d = { component: 'parser', param: param, field: field };
-            if (onChange) d.onChange = onChange;
-            if (onRender) d.onRender = onRender;
-            Lampa.SettingsApi.addParam(d);
-        }
-        try { Lampa.Lang.add({ en_pub_title: { ru: 'Публичные трекеры (EN)', en: 'Public trackers (EN)', uk: 'Публічні трекери (EN)' } }); } catch (e) {}
-        var title = 'Публичные трекеры (EN)';
-        try { title = Lampa.Lang.translate('en_pub_title'); } catch (e) {}
-        add({ name: PREFIX + 'section', type: 'title' }, { name: title });
-        add({ name: PREFIX + 'enabled', type: 'trigger', default: true }, { name: title, description: 'Под-переключатель публичных трекеров. Общий рубильник — кнопка EN в шапке: она выключает и v2, и публичные.' });
-        add({ name: PREFIX + 'ru', type: 'trigger', default: false }, { name: 'Показывать русскую озвучку', description: 'Выкл = скрывать раздачи с явной русской озвучкой/дубляжом; [RUS] только в субтитрах не скрывает' });
-        add({ name: PREFIX + 'dub', type: 'select', default: 'prefer', values: { off: 'Не фильтровать даб', prefer: 'Предпочитать английский даб', only: 'Только английский даб' } }, { name: 'Английский даб', description: 'prefer = дабы выше; only = скрыть релизы без пометки dub/dual audio' });
-        SOURCES.forEach(function (s) { add({ name: PREFIX + 'src_' + s.id, type: 'trigger', default: s.def }, { name: s.title }); });
-        add({ name: PREFIX + 'test', type: 'button' }, { name: 'Проверить публичные трекеры', description: 'Результат придёт уведомлением, без окон' }, testPublic);
-        add({ name: PREFIX + 'status', type: 'static' }, { name: 'Состояние проверки', description: ' ' }, null, function (item) { try { item.find('.settings-param__descr').text(LAST.text); } catch (e) {} });
-        registered = true;
-        console.log('[EN Public] настройки зарегистрированы в разделе Парсер (без прокси)');
-        return true;
-    }
-    function wrapSort() {
-        if (sortWrapped) return true;
-        try {
-            if (!Lampa.Component || !Lampa.Component.get || !Lampa.Component.add) return false;
-            var Orig = Lampa.Component.get('torrents');
-            if (!Orig || Orig.__en_pub_sort) { sortWrapped = true; return true; }
-            function W(object) {
-                Orig.call(this, object);
-                var sr = this.sortResults; if (typeof sr !== 'function') return;
-                var key = cardKey(object || {});
-                this.sortResults = function (need) {
-                    sr.call(this, need);
-                    var data = deliveredByCard[key]; if (!data || !data.Results) return;
-                    var f = [], s = [], i, it;
-                    for (i = 0; i < data.Results.length; i++) { it = data.Results[i]; if (it && (it.en_public || it.en_sources_v2)) f.push(it); else s.push(it); }
-                    data.Results.length = 0;
-                    for (i = 0; i < f.length; i++) data.Results.push(f[i]);
-                    for (i = 0; i < s.length; i++) data.Results.push(s[i]);
-                };
-            }
-            W.__en_pub_sort = true;
-            if (Orig.prototype) W.prototype = Orig.prototype;
-            Lampa.Component.add('torrents', W);
-            sortWrapped = true;
-            return true;
-        } catch (e) { return false; }
-    }
-    function hook() {
-        if (!window.Lampa || !Lampa.Parser || typeof Lampa.Parser.get !== 'function') return false;
-        if (!clearHooked) {
-            var oc = Lampa.Parser.clear;
-            Lampa.Parser.clear = function () { clearTime = Date.now(); if (oc) return oc.apply(this, arguments); };
-            clearHooked = true;
-        }
-        if (Lampa.Parser._en_public_hooked) return true;
-        var orig = Lampa.Parser.get;
-        Lampa.Parser.get = function (object, oncomplite, onerror) {
-            if (!enabled()) return orig.call(this, object, oncomplite, onerror);
-            var self = this, called = false, pubDone = false, stdDone = false, pub = [], std = null;
-            var key = cardKey(object || {}); var started = Date.now();
-            var guard = setTimeout(function () { finish(true); }, 45000);
-            function deliver(data) { if (called) return; called = true; clearTimeout(guard); deliveredByCard[key] = data; try { oncomplite(data); } catch (e) {} }
-            function finish(force) {
-                if (called) return;
-                if (clearTime >= started) { called = true; clearTimeout(guard); return; }
-                if (!force && (!pubDone || !stdDone)) return;
-                if (dubMode() === 'prefer') pub = pub.slice().sort(function (a, b) { return (b.en_dub ? 1 : 0) - (a.en_dub ? 1 : 0) || (b.Seeders || 0) - (a.Seeders || 0); });
-                var stdRes = (std && std.Results) || [];
-                var v2f = [], standard = [], i, it;
-                for (i = 0; i < stdRes.length; i++) { it = stdRes[i]; if (it && (it.en_public || it.en_sources_v2)) v2f.push(it); else standard.push(it); }
-                var res = dedupeItems(pub.concat(v2f).concat(standard));
-                if (res.length > MAX_RESULTS) res = res.slice(0, MAX_RESULTS);
-                deliver({ Results: res });
-            }
-            search(object, function (items) { pub = items || []; pubDone = true; finish(false); });
-            try { orig.call(self, object, function (data) { std = data; stdDone = true; finish(false); }, function () { stdDone = true; finish(false); }); }
-            catch (e) { stdDone = true; finish(false); }
-        };
-        Lampa.Parser._en_public_hooked = true;
-        console.log('[EN Public] hooked v1.13.0 (merged into EN Sources 2.13.0, no proxy)');
-        return true;
-    }
-    function start() {
-        try { if (Lampa.Storage.get('en_sources_v2_enabled') === undefined) Lampa.Storage.set('en_sources_v2_enabled', 'true'); } catch (e) {}
-        register();
-        var tries = 0, t = setInterval(function () {
-            tries++; register(); wrapSort();
-            if ((hook() && registered && sortWrapped) || tries > 240) clearInterval(t);
-        }, 500);
-    }
-    if (window.appready) { start(); return; }
-    var booted = false;
-    function go() { if (!booted) { booted = true; start(); } }
-    if (window.Lampa && Lampa.Listener && Lampa.Listener.follow) Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') go(); });
-    var w = 0, bt = setInterval(function () { w++; if (window.appready) { clearInterval(bt); go(); } else if (w > 240) clearInterval(bt); }, 500);
-})();
