@@ -1662,11 +1662,11 @@
     boot();
 })(window, document);
 /*!
- * EN Sources 2.9.0 — модуль публичных трекеров (хвост единого файла)
+ * EN Sources 2.10.0 — модуль публичных трекеров (хвост единого файла)
  * ВСТАВКА: после строки })(window, document); первого модуля.
- * БЕЗ ПРОКСИ. Зарубежные первыми (в т.ч. после пересортировки Lampa).
- * Nyaa: два запроса (сиды + новизна) => несколько эпизодов/пакетов.
- * Язык: fansub-маркеры (MultiSub/Erai-raws/SubsPlease/CR) = EN.
+ * БЕЗ ПРОКСИ. Зарубежные первыми. Nyaa: сиды+новизна (+dual audio при даб-режиме).
+ * Новый источник: The Pirate Bay (apibay) — дабы/WEB-DL.
+ * Режим "Английский даб": off / prefer / only.
  */
 (function () {
     'use strict';
@@ -1680,12 +1680,15 @@
         { id: 'anidex',    title: 'AniDex',        def: false },
         { id: 'yts',       title: 'YTS',           def: true  },
         { id: 'eztv',      title: 'EZTV',          def: true  },
-        { id: 'tg',        title: 'TorrentGalaxy', def: true  }
+        { id: 'tg',        title: 'TorrentGalaxy', def: true  },
+        { id: 'tpb',       title: 'The Pirate Bay', def: true }
     ];
     var YTS_HOSTS = ['yts.mx', 'yts.rs', 'yts.ag', 'yts.lt'];
     var EZTV_HOSTS = ['eztvx.to', 'eztv.re', 'eztv.ch'];
+    var TPB_HOSTS = ['apibay.org'];
     var RU_RE = /\b(rus|russian|ru|dub|dubbed|mvo|vo|lostfilm|newstudio|alexfilm|jaskier|cube77|hamster|goblin|baibako|coldfilm|amedia|foxlife|levelin|omskbird|viruseproject|sunshine|parovoz)\b|(?:рус|дубляж|озвучк|мво|кураж|гоблин|сербин|паровоз|кубик)/i;
     var EN_RE = /\b(english|eng|multisub|multi-sub|multi|erai-raws|subsplease|horriblesubs|crunchyroll)\b|cr web|\[multi/i;
+    var DUB_RE = /\b(dub|dubbed|dual[ .-]?audio|english[ .-]?dub|eng[ .-]?dub)\b/i;
     var CJK_RE = /[\u3000-\u9fff\uff00-\uffef]/;
     var LAST = { counts: {}, errors: {}, time: 0, text: 'Проверка ещё не запускалась' };
     window.__en_pub_last = LAST;
@@ -1696,7 +1699,9 @@
     function truthy(v) { return v === true || v === 'true' || v === 1 || v === '1'; }
     function enabled() { return truthy(Lampa.Storage.get(PREFIX + 'enabled', true)); }
     function showRu() { return truthy(Lampa.Storage.get(PREFIX + 'ru', false)); }
+    function dubMode() { var v = String(Lampa.Storage.get(PREFIX + 'dub', 'prefer') || 'prefer'); return (v === 'off' || v === 'only') ? v : 'prefer'; }
     function passLang(title) { return showRu() || !RU_RE.test(String(title || '')); }
+    function passDub(title) { return dubMode() !== 'only' || DUB_RE.test(String(title || '')); }
     function srcOn(id) {
         var def = true, i;
         for (i = 0; i < SOURCES.length; i++) if (SOURCES[i].id === id) def = SOURCES[i].def;
@@ -1768,7 +1773,7 @@
     function audioState(t) {
         t = String(t || '');
         if (RU_RE.test(t)) return false;
-        if (EN_RE.test(t)) return true;
+        if (DUB_RE.test(t) || EN_RE.test(t)) return true;
         return null;
     }
     function makeItem(o) {
@@ -1786,7 +1791,8 @@
             Seeders: parseInt(o.seeds, 10) || 0, Peers: parseInt(o.peers, 10) || 0,
             Size: size, size: human, MagnetUri: o.magnet || '', Link: o.magnet || o.link || '',
             PublishDate: date, PublisTime: date, hash: hash || o.magnet || t,
-            en_public: true, en_sources_v2: true, en_source_name: o.tracker || 'EN', en_audio: audioState(t)
+            en_public: true, en_sources_v2: true, en_source_name: o.tracker || 'EN', en_audio: audioState(t),
+            en_dub: DUB_RE.test(t)
         };
     }
     function dedupeItems(arr) {
@@ -1906,6 +1912,19 @@
         } catch (e) { console.log('[EN Public] tg', e); }
         return items;
     }
+    function parseTpb(json) {
+        var items = [];
+        var list = json && json.length ? json : null;
+        (list || []).forEach(function (t) {
+            if (!t || !t.info_hash || /^0+$/.test(String(t.info_hash))) return;
+            items.push(makeItem({
+                title: t.name, tracker: 'TPB', seeds: t.seeders, peers: t.leechers,
+                size: parseInt(t.size, 10) || 0, date: t.added ? parseInt(t.added, 10) * 1000 : '',
+                hash: t.info_hash, magnet: 'magnet:?xt=urn:btih:' + t.info_hash + '&dn=' + encodeURIComponent(t.name || '')
+            }));
+        });
+        return items;
+    }
     function search(object, cb) {
         var movie = object.movie || {};
         var isSeries = !!movie.number_of_seasons;
@@ -1915,11 +1934,12 @@
         if (!/^tt\d{7,10}$/.test(imdb)) imdb = '';
         var season = parseInt(movie.season_number, 10) || 0;
         var episode = parseInt(movie.episode_number, 10) || 0;
+        var dm = dubMode();
         LAST.counts = {}; LAST.errors = {}; LAST.time = Date.now();
         var tasks = [], items = [], done = 0, finished = false, safety;
         function fin() { if (finished) return; finished = true; clearTimeout(safety); LAST.text = summary(); cb(items); }
         function complete(res) {
-            var clean = (res || []).filter(function (it) { return it && passLang(it.Title); });
+            var clean = (res || []).filter(function (it) { return it && passLang(it.Title) && passDub(it.Title); });
             if (clean.length) items = items.concat(clean);
             done++;
             if (done >= tasks.length) fin();
@@ -1947,7 +1967,12 @@
                             var r = parseNyaa(s);
                             if (r.length) {
                                 fetchText(nyaaRss(qq, cat, 'id'), function (s2) {
-                                    c(dedupeItems(r.concat(parseNyaa(s2))));
+                                    var merged = r.concat(parseNyaa(s2));
+                                    if (dm !== 'off') {
+                                        fetchText(nyaaRss(qq + ' dual audio', cat, 'seeders'), function (s3) {
+                                            c(dedupeItems(merged.concat(parseNyaa(s3))));
+                                        });
+                                    } else c(dedupeItems(merged));
                                 });
                             } else tryCat(cat);
                         });
@@ -1975,6 +2000,7 @@
                 else byTitle();
             }));
             if (srcOn('tg')) tasks.push(track('tg', function (c) { fetchText('https://torrentgalaxy.to/torrents.php?search=' + encodeURIComponent(q) + '&sort=seeders&order=desc', function (s) { c(parseTG(s)); }); }));
+            if (srcOn('tpb')) tasks.push(track('tpb', function (c) { mirrorJson(TPB_HOSTS, '/q.php?q=' + encodeURIComponent(q), function (j) { c(parseTpb(j)); }, function (j) { return !!j.length; }); }));
         }
         if (imdb) {
             if (srcOn('torrentio') && (!isSeries || episode)) tasks.push(track('torrentio', function (c) {
@@ -2048,6 +2074,7 @@
         add({ name: PREFIX + 'section', type: 'title' }, { name: title });
         add({ name: PREFIX + 'enabled', type: 'trigger', default: true }, { name: title, description: 'Добавлять результаты публичных зарубежных трекеров к поиску Lampa' });
         add({ name: PREFIX + 'ru', type: 'trigger', default: false }, { name: 'Показывать русские дорожки', description: 'Выкл = скрывать раздачи с русской озвучкой/дубляжом из зарубежных' });
+        add({ name: PREFIX + 'dub', type: 'select', default: 'prefer', values: { off: 'Не фильтровать даб', prefer: 'Предпочитать английский даб', only: 'Только английский даб' } }, { name: 'Английский даб', description: 'prefer = дабы выше; only = скрыть релизы без пометки dub/dual audio' });
         SOURCES.forEach(function (s) {
             add({ name: PREFIX + 'src_' + s.id, type: 'trigger', default: s.def }, { name: s.title });
         });
@@ -2111,6 +2138,9 @@
             function finish(force) {
                 if (called) return;
                 if (!force && (!pubDone || !stdDone)) return;
+                if (dubMode() === 'prefer') {
+                    pub = pub.slice().sort(function (a, b) { return (b.en_dub ? 1 : 0) - (a.en_dub ? 1 : 0); });
+                }
                 var stdRes = (std && std.Results) || [];
                 var v2foreign = [], standard = [], i, it;
                 for (i = 0; i < stdRes.length; i++) {
@@ -2127,7 +2157,7 @@
             } catch (e) { stdDone = true; finish(false); }
         };
         Lampa.Parser._en_public_hooked = true;
-        console.log('[EN Public] hooked v1.9.0 (merged into EN Sources 2.9.0, no proxy)');
+        console.log('[EN Public] hooked v1.10.0 (merged into EN Sources 2.10.0, no proxy)');
         return true;
     }
     function start() {
