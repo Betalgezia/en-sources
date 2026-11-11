@@ -1661,6 +1661,11 @@
 
     boot();
 })(window, document);
+/*!
+ * EN Sources 2.1.1 — модуль публичных трекеров (хвост единого файла)
+ * ВСТАВКА: после строки })(window, document); первого модуля.
+ * Torrentio, Nyaa.si, AniDex, YTS, EZTV, TorrentGalaxy + самопроверка.
+ */
 (function () {
     'use strict';
     if (window.en_public_plugin) return;
@@ -1675,17 +1680,23 @@
         { id: 'eztv',      title: 'EZTV',          def: true,  proxy: false },
         { id: 'tg',        title: 'TorrentGalaxy', def: false, proxy: true  }
     ];
+    var LAST = { counts: {}, errors: {}, time: 0 };
+    window.__en_pub_last = LAST;
 
     function start() {
         var comp = 'en_sources';
-        function addParam(component, param, field) {
-            try { Lampa.SettingsApi.addParam({ component: component, param: param, field: field }); return true; }
-            catch (e) { return false; }
+        function addParam(component, param, field, onChange) {
+            try {
+                var d = { component: component, param: param, field: field };
+                if (onChange) d.onChange = onChange;
+                Lampa.SettingsApi.addParam(d);
+                return true;
+            } catch (e) { return false; }
         }
         try {
             Lampa.Lang.add({
                 en_pub_title: { ru: 'Публичные трекеры (EN)', en: 'Public trackers (EN)', uk: 'Публічні трекери (EN)' },
-                en_pub_descr: { ru: 'Добавлять результаты публичных зарубежных трекеров к поиску Lampa', en: 'Append public foreign tracker results to Lampa search', uk: 'Додавати результати публічних зарубіжних трекерів до пошуку Lampa' }
+                en_pub_test: { ru: 'Проверить публичные трекеры', en: 'Test public trackers', uk: 'Перевірити публічні трекери' }
             });
         } catch (e) {}
         var title = 'Публичные трекеры (EN)';
@@ -1698,7 +1709,8 @@
         SOURCES.forEach(function (s) {
             addParam(comp, { name: PREFIX + 'src_' + s.id, type: 'trigger', default: s.def }, { name: s.title });
         });
-        try { window.__lampa_en_sources_v2__.public = '1.1.0'; } catch (e) {}
+        addParam(comp, { name: PREFIX + 'test', type: 'button' }, { name: 'Проверить публичные трекеры', description: 'Покажет по каждому трекеру: найдено / ошибка' }, testPublic);
+        try { window.__lampa_en_sources_v2__.public = '1.1.1'; } catch (e) {}
 
         function truthy(v) { return v === true || v === 'true' || v === 1 || v === '1'; }
         function enabled() { return truthy(Lampa.Storage.get(PREFIX + 'enabled', true)); }
@@ -1734,6 +1746,11 @@
             var mult = { k: 1024, m: 1048576, g: 1073741824, t: 1099511627776 };
             return Math.round(num * (mult[(m[2] || '').toLowerCase()] || 1));
         }
+        function audioState(title) {
+            if (/\b(english|eng)\b/i.test(title)) return true;
+            if (/\b(russian|rus|ukrainian|ukr|japanese|jpn|french|german|spanish)\b/i.test(title)) return false;
+            return null;
+        }
         function makeItem(o) {
             var hash = String(o.hash || '').toLowerCase();
             if (!hash) { var hm = String(o.magnet || '').match(/btih:([a-fA-F0-9]{40})/i); if (hm) hash = hm[1].toLowerCase(); }
@@ -1743,11 +1760,13 @@
             var human = '';
             try { if (Lampa.Utils && Lampa.Utils.bytesToSize) human = Lampa.Utils.bytesToSize(size); } catch (e) {}
             if (!human && size) human = (size / 1073741824).toFixed(2) + ' ГБ';
+            var t = o.title || 'Unknown';
             return {
-                Title: o.title || 'Unknown', Tracker: o.tracker || 'EN',
+                Title: t, Tracker: o.tracker || 'EN',
                 Seeders: parseInt(o.seeds, 10) || 0, Peers: parseInt(o.peers, 10) || 0,
                 Size: size, size: human, MagnetUri: o.magnet || '', Link: o.magnet || o.link || '',
-                PublishDate: date, PublisTime: date, hash: hash || o.magnet || o.title, en_public: true
+                PublishDate: date, PublisTime: date, hash: hash || o.magnet || t,
+                en_public: true, en_sources_v2: true, en_source_name: o.tracker || 'EN', en_audio: audioState(t)
             };
         }
         function xmlText(node, name) {
@@ -1865,25 +1884,57 @@
             var imdb = String(movie.imdb_id || '');
             if (/^\d+$/.test(imdb)) imdb = 'tt' + ('0000000' + imdb).slice(-7);
             if (!/^tt\d{7,10}$/.test(imdb)) imdb = '';
+            LAST.counts = {}; LAST.errors = {}; LAST.time = Date.now();
             var tasks = [], items = [], done = 0, finished = false, safety;
             function fin() { if (finished) return; finished = true; clearTimeout(safety); cb(items); }
             function complete(res) { if (res && res.length) items = items.concat(res); done++; if (done >= tasks.length) fin(); }
+            function track(id, fn) {
+                return function (cb2) {
+                    fn(function (res) {
+                        LAST.counts[id] = (res || []).length;
+                        if (!res) LAST.errors[id] = 'сеть/CORS/блокировка';
+                        cb2(res);
+                    });
+                };
+            }
             if (q) {
-                if (srcOn('nyaa')) tasks.push(function (cb2) { getText('https://nyaa.si/?page=rss&c=1_2&s=seeders&o=desc&q=' + encodeURIComponent(q), true, function (s) { cb2(parseNyaa(s)); }); });
-                if (srcOn('anidex')) tasks.push(function (cb2) { getJson('https://anidex.info/api/?q=' + encodeURIComponent(q) + '&s=seeders&o=desc', false, function (j) { cb2(parseAnidex(j)); }); });
-                if (!isSeries && srcOn('yts')) tasks.push(function (cb2) { getJson('https://yts.mx/api/v2/list_movies.json?query_term=' + encodeURIComponent(q) + '&limit=50', false, function (j) { cb2(parseYts(j)); }); });
-                if (srcOn('tg')) tasks.push(function (cb2) { getText('https://torrentgalaxy.to/torrents.php?search=' + encodeURIComponent(q) + '&sort=seeders&order=desc', true, function (s) { cb2(parseTG(s)); }); });
+                if (srcOn('nyaa')) tasks.push(track('nyaa', function (c) { getText('https://nyaa.si/?page=rss&c=1_2&s=seeders&o=desc&q=' + encodeURIComponent(q), true, function (s) { c(parseNyaa(s)); }); }));
+                if (srcOn('anidex')) tasks.push(track('anidex', function (c) { getJson('https://anidex.info/api/?q=' + encodeURIComponent(q) + '&s=seeders&o=desc', false, function (j) { c(parseAnidex(j)); }); }));
+                if (!isSeries && srcOn('yts')) tasks.push(track('yts', function (c) { getJson('https://yts.mx/api/v2/list_movies.json?query_term=' + encodeURIComponent(q) + '&limit=50', false, function (j) { c(parseYts(j)); }); }));
+                if (srcOn('tg')) tasks.push(track('tg', function (c) { getText('https://torrentgalaxy.to/torrents.php?search=' + encodeURIComponent(q) + '&sort=seeders&order=desc', true, function (s) { c(parseTG(s)); }); }));
             }
             if (imdb) {
-                if (srcOn('torrentio')) tasks.push(function (cb2) {
+                if (srcOn('torrentio')) tasks.push(track('torrentio', function (c) {
                     var path = isSeries ? 'series/' + imdb + ':' + (parseInt(movie.season_number, 10) || 1) + ':' + (parseInt(movie.episode_number, 10) || 1) : 'movie/' + imdb;
-                    getJson('https://torrentio.strem.fun/qualityfilter=480p,scr,cam,unknown/stream/' + path + '.json', false, function (j) { cb2(parseTorrentio(j)); });
-                });
-                if (isSeries && srcOn('eztv')) tasks.push(function (cb2) { getJson('https://eztvx.to/api/get-torrents?imdb_id=' + imdb + '&limit=100', false, function (j) { cb2(parseEztv(j, object)); }); });
+                    getJson('https://torrentio.strem.fun/qualityfilter=480p,scr,cam,unknown/stream/' + path + '.json', false, function (j) { c(parseTorrentio(j)); });
+                }));
+                if (isSeries && srcOn('eztv')) tasks.push(track('eztv', function (c) { getJson('https://eztvx.to/api/get-torrents?imdb_id=' + imdb + '&limit=100', false, function (j) { c(parseEztv(j, object)); }); }));
             }
             if (!tasks.length) { fin(); return; }
             safety = setTimeout(fin, 25000);
             tasks.forEach(function (t) { try { t(complete); } catch (e) { complete(null); } });
+        }
+        function summary() {
+            var parts = [], i, s, id;
+            for (i = 0; i < SOURCES.length; i++) {
+                s = SOURCES[i]; id = s.id;
+                if (!srcOn(id)) { parts.push(s.title + ': выкл'); continue; }
+                if (LAST.errors[id]) parts.push(s.title + ': ' + LAST.errors[id]);
+                else parts.push(s.title + ': ' + (LAST.counts[id] || 0));
+            }
+            return parts.join(' · ');
+        }
+        function testPublic() {
+            try { Lampa.Noty.show('Проверяю публичные трекеры...'); } catch (e) {}
+            search({ search: 'Plan 9 from Outer Space', movie: { title: 'Plan 9 from Outer Space', original_title: 'Plan 9 from Outer Space', imdb_id: 'tt0052077' } }, function () {
+                var text = summary();
+                console.log('[EN Public] test:', text);
+                try { Lampa.Noty.show(text, { time: 8000 }); } catch (e) {}
+                try {
+                    var $ = window.jQuery || window.$;
+                    if ($ && Lampa.Modal) Lampa.Modal.open({ title: 'Публичные трекеры', html: $('<div style="padding:1em;line-height:1.6">' + text.replace(/·/g, '<br>') + '</div>'), size: 'medium', onBack: function () { Lampa.Modal.close(); } });
+                } catch (e) {}
+            });
         }
         function hook() {
             if (!window.Lampa || !Lampa.Parser || typeof Lampa.Parser.get !== 'function') return false;
@@ -1903,7 +1954,7 @@
                         k = String(res[i].hash || res[i].MagnetUri || res[i].Title || i);
                         if (!seen[k]) { seen[k] = true; out.push(res[i]); }
                     }
-                    console.log('[EN Public] results:', out.length, '(public:', pub.length + ')');
+                    console.log('[EN Public] results:', out.length, '(public:', pub.length + ')', summary());
                     deliver({ Results: out });
                 }
                 search(object, function (items) { pub = items || []; pubDone = true; finish(false); });
@@ -1912,7 +1963,7 @@
                 } catch (e) { stdDone = true; finish(false); }
             };
             Lampa.Parser._en_public_hooked = true;
-            console.log('[EN Public] hooked v1.1.0 (merged into EN Sources 2.1.0)');
+            console.log('[EN Public] hooked v1.1.1 (merged into EN Sources 2.1.1)');
             return true;
         }
         var tries = 0, t = setInterval(function () { tries++; if (hook() || tries > 120) clearInterval(t); }, 500);
