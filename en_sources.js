@@ -1662,11 +1662,10 @@
     boot();
 })(window, document);
 /*!
- * EN Sources 2.10.0 — модуль публичных трекеров (хвост единого файла)
+ * EN Sources 2.11.0 — модуль публичных трекеров (хвост единого файла)
  * ВСТАВКА: после строки })(window, document); первого модуля.
- * БЕЗ ПРОКСИ. Зарубежные первыми. Nyaa: сиды+новизна (+dual audio при даб-режиме).
- * Новый источник: The Pirate Bay (apibay) — дабы/WEB-DL.
- * Режим "Английский даб": off / prefer / only.
+ * БЕЗ ПРОКСИ. Nyaa: HTML-пагинация (все эпизоды/пакеты) + RSS fallback.
+ * Зарубежные первыми. Даб-режим. TPB. Фильтр RU не режет английские дабы.
  */
 (function () {
     'use strict';
@@ -1686,7 +1685,7 @@
     var YTS_HOSTS = ['yts.mx', 'yts.rs', 'yts.ag', 'yts.lt'];
     var EZTV_HOSTS = ['eztvx.to', 'eztv.re', 'eztv.ch'];
     var TPB_HOSTS = ['apibay.org'];
-    var RU_RE = /\b(rus|russian|ru|dub|dubbed|mvo|vo|lostfilm|newstudio|alexfilm|jaskier|cube77|hamster|goblin|baibako|coldfilm|amedia|foxlife|levelin|omskbird|viruseproject|sunshine|parovoz)\b|(?:рус|дубляж|озвучк|мво|кураж|гоблин|сербин|паровоз|кубик)/i;
+    var RU_RE = /\b(rus|russian|ru|mvo)\b|(?:рус|дубляж|озвучк|кураж|гоблин|сербин|паровоз|кубик|lostfilm|newstudio|alexfilm|jaskier|cube77|hamster|baibako|coldfilm|amedia|levelin|omskbird|viruseproject)/i;
     var EN_RE = /\b(english|eng|multisub|multi-sub|multi|erai-raws|subsplease|horriblesubs|crunchyroll)\b|cr web|\[multi/i;
     var DUB_RE = /\b(dub|dubbed|dual[ .-]?audio|english[ .-]?dub|eng[ .-]?dub)\b/i;
     var CJK_RE = /[\u3000-\u9fff\uff00-\uffef]/;
@@ -1828,11 +1827,81 @@
                     magnet: 'magnet:?xt=urn:btih:' + hash + '&dn=' + encodeURIComponent(title) + '&tr=' + encodeURIComponent('http://nyaa.tracker.wf:7777/announce')
                 }));
             }
-        } catch (e) { console.log('[EN Public] nyaa', e); }
+        } catch (e) { console.log('[EN Public] nyaa rss', e); }
+        return items;
+    }
+    function parseNyaaHtml(str) {
+        var items = [];
+        if (!str || typeof DOMParser === 'undefined') return items;
+        try {
+            var doc = new DOMParser().parseFromString(str, 'text/html');
+            var rows = doc.querySelectorAll('table.torrent-list tbody tr');
+            for (var i = 0; i < rows.length; i++) {
+                var tds = rows[i].querySelectorAll('td');
+                if (tds.length < 7) continue;
+                var a = tds[1].querySelector('a[href*="/view/"]') || tds[1].querySelector('a');
+                var title = a ? String(a.getAttribute('title') || a.textContent || '').replace(/^\s+|\s+$/g, '') : '';
+                var mag = rows[i].querySelector('a[href^="magnet:"]');
+                var magnet = mag ? mag.getAttribute('href') : '';
+                if (!title || !magnet) continue;
+                var hm = magnet.match(/btih:([a-zA-Z0-9]{32,40})/);
+                items.push(makeItem({
+                    title: title, tracker: 'Nyaa',
+                    seeds: tds[5].textContent, peers: tds[6].textContent,
+                    size: parseSize(tds[3].textContent), date: tds[4].textContent,
+                    hash: hm ? hm[1] : '', magnet: magnet
+                }));
+            }
+        } catch (e) { console.log('[EN Public] nyaa html', e); }
         return items;
     }
     function nyaaRss(q, cat, sort) {
         return 'https://nyaa.si/?page=rss&c=' + cat + '&s=' + sort + '&o=desc&q=' + encodeURIComponent(q);
+    }
+    function nyaaHtmlUrl(q, cat, sort, page) {
+        return 'https://nyaa.si/?f=0&c=' + cat + '&q=' + encodeURIComponent(q) + '&s=' + sort + '&o=desc&p=' + page;
+    }
+    function nyaaSearch(q, dm, cb) {
+        resolveCandidates(q, function (cands) {
+            var ci = 0;
+            function tryCandidate(cat) {
+                if (ci >= cands.length) {
+                    if (cat === '1_2') { ci = 0; tryCandidate('0_0'); } else cb([]);
+                    return;
+                }
+                var qq = cands[ci++];
+                var acc = [], page = 1, MAXP = 2;
+                function nextPage() {
+                    if (page > MAXP) { addPopular(); return; }
+                    fetchText(nyaaHtmlUrl(qq, cat, 'id', page), function (s) {
+                        var r = parseNyaaHtml(s);
+                        if (page === 1 && !r.length) {
+                            fetchText(nyaaRss(qq, cat, 'seeders'), function (rs) {
+                                var rr = parseNyaa(rs);
+                                if (rr.length) { acc = acc.concat(rr); addPopular(); }
+                                else tryCandidate(cat);
+                            });
+                            return;
+                        }
+                        acc = acc.concat(r);
+                        page++;
+                        nextPage();
+                    });
+                }
+                function addPopular() {
+                    fetchText(nyaaHtmlUrl(qq, cat, 'seeders', 1), function (s) {
+                        acc = dedupeItems(acc.concat(parseNyaaHtml(s)));
+                        if (dm !== 'off') {
+                            fetchText(nyaaRss(qq + ' dual audio', cat, 'seeders'), function (s3) {
+                                cb(dedupeItems(acc.concat(parseNyaa(s3))));
+                            });
+                        } else cb(acc);
+                    });
+                }
+                nextPage();
+            }
+            tryCandidate('1_2');
+        });
     }
     function parseAnidex(json) {
         var items = [];
@@ -1954,32 +2023,7 @@
             };
         }
         if (q) {
-            if (srcOn('nyaa')) tasks.push(track('nyaa', function (c) {
-                resolveCandidates(q, function (cands) {
-                    var i = 0;
-                    function tryCat(cat) {
-                        if (i >= cands.length) {
-                            if (cat === '1_2') { i = 0; tryCat('0_0'); } else c([]);
-                            return;
-                        }
-                        var qq = cands[i++];
-                        fetchText(nyaaRss(qq, cat, 'seeders'), function (s) {
-                            var r = parseNyaa(s);
-                            if (r.length) {
-                                fetchText(nyaaRss(qq, cat, 'id'), function (s2) {
-                                    var merged = r.concat(parseNyaa(s2));
-                                    if (dm !== 'off') {
-                                        fetchText(nyaaRss(qq + ' dual audio', cat, 'seeders'), function (s3) {
-                                            c(dedupeItems(merged.concat(parseNyaa(s3))));
-                                        });
-                                    } else c(dedupeItems(merged));
-                                });
-                            } else tryCat(cat);
-                        });
-                    }
-                    tryCat('1_2');
-                });
-            }));
+            if (srcOn('nyaa')) tasks.push(track('nyaa', function (c) { nyaaSearch(q, dm, c); }));
             if (srcOn('anidex')) tasks.push(track('anidex', function (c) {
                 resolveCandidates(q, function (cands) {
                     var i = 0;
@@ -2157,7 +2201,7 @@
             } catch (e) { stdDone = true; finish(false); }
         };
         Lampa.Parser._en_public_hooked = true;
-        console.log('[EN Public] hooked v1.10.0 (merged into EN Sources 2.10.0, no proxy)');
+        console.log('[EN Public] hooked v1.11.0 (merged into EN Sources 2.11.0, no proxy)');
         return true;
     }
     function start() {
