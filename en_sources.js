@@ -1662,10 +1662,11 @@
     boot();
 })(window, document);
 /*!
- * EN Sources 2.4.0 — модуль публичных трекеров (хвост единого файла)
+ * EN Sources 2.6.0 — модуль публичных трекеров (хвост единого файла)
  * ВСТАВКА: после строки })(window, document); первого модуля.
- * Без Modal: проверка через Noty + строка состояния, контроллеры не трогаются.
- * Порядок сети: напрямую -> твой прокси -> allorigins -> corsproxy.
+ * Сериалы: все эпизоды/сезоны (EZTV без эпизодного фильтра) + паки TG.
+ * Фильмы: YTS по IMDb затем по названию; TG по названию; Torrentio по IMDb.
+ * Сеть: напрямую -> твой прокси -> allorigins -> corsproxy. Без Modal.
  */
 (function () {
     'use strict';
@@ -1680,7 +1681,7 @@
         { id: 'anidex',    title: 'AniDex',        def: false },
         { id: 'yts',       title: 'YTS',           def: true  },
         { id: 'eztv',      title: 'EZTV',          def: true  },
-        { id: 'tg',        title: 'TorrentGalaxy', def: false }
+        { id: 'tg',        title: 'TorrentGalaxy', def: true  }
     ];
     var YTS_HOSTS = ['yts.mx', 'yts.rs', 'yts.ag', 'yts.lt'];
     var EZTV_HOSTS = ['eztvx.to', 'eztv.re', 'eztv.ch'];
@@ -1823,10 +1824,8 @@
     function parseEztv(json, object) {
         var items = [], movie = object.movie || {};
         var season = parseInt(movie.season_number, 10) || 0;
-        var episode = parseInt(movie.episode_number, 10) || 0;
         if (json && json.torrents) json.torrents.forEach(function (t) {
             if (season && parseInt(t.season, 10) !== season) return;
-            if (episode && parseInt(t.episode, 10) !== episode) return;
             var magnet = t.torrent_url && t.torrent_url.indexOf('magnet:') === 0 ? t.torrent_url : 'magnet:?xt=urn:btih:' + t.hash;
             items.push(makeItem({
                 title: t.filename || t.title, tracker: 'EZTV', seeds: t.seeds, peers: t.peers,
@@ -1878,10 +1877,12 @@
     function search(object, cb) {
         var movie = object.movie || {};
         var isSeries = !!movie.number_of_seasons;
-        var q = String(movie.original_title || movie.original_name || object.search || movie.title || '').replace(/^\s+|\s+$/g, '');
+        var q = String(movie.original_title || movie.original_name || movie.title || movie.name || object.search || '').replace(/^\s+|\s+$/g, '');
         var imdb = String(movie.imdb_id || '');
         if (/^\d+$/.test(imdb)) imdb = 'tt' + ('0000000' + imdb).slice(-7);
         if (!/^tt\d{7,10}$/.test(imdb)) imdb = '';
+        var season = parseInt(movie.season_number, 10) || 0;
+        var episode = parseInt(movie.episode_number, 10) || 0;
         LAST.counts = {}; LAST.errors = {}; LAST.time = Date.now();
         var tasks = [], items = [], done = 0, finished = false, safety;
         function fin() { if (finished) return; finished = true; clearTimeout(safety); LAST.text = summary(); cb(items); }
@@ -1898,12 +1899,16 @@
         if (q) {
             if (srcOn('nyaa')) tasks.push(track('nyaa', function (c) { fetchText('https://nyaa.si/?page=rss&c=1_2&s=seeders&o=desc&q=' + encodeURIComponent(q), function (s) { c(parseNyaa(s)); }); }));
             if (srcOn('anidex')) tasks.push(track('anidex', function (c) { fetchJson('https://anidex.info/api/?q=' + encodeURIComponent(q) + '&s=seeders&o=desc', function (j) { c(parseAnidex(j)); }); }));
-            if (!isSeries && srcOn('yts')) tasks.push(track('yts', function (c) { mirrorJson(YTS_HOSTS, '/api/v2/list_movies.json?query_term=' + encodeURIComponent(q) + '&limit=50', function (j) { c(parseYts(j)); }); }));
+            if (!isSeries && srcOn('yts')) tasks.push(track('yts', function (c) {
+                function byTitle() { mirrorJson(YTS_HOSTS, '/api/v2/list_movies.json?query_term=' + encodeURIComponent(q) + '&limit=50', function (j) { c(parseYts(j)); }); }
+                if (imdb) mirrorJson(YTS_HOSTS, '/api/v2/list_movies.json?query_term=' + imdb + '&limit=50', function (j) { var r = parseYts(j); if (r.length) c(r); else byTitle(); });
+                else byTitle();
+            }));
             if (srcOn('tg')) tasks.push(track('tg', function (c) { fetchText('https://torrentgalaxy.to/torrents.php?search=' + encodeURIComponent(q) + '&sort=seeders&order=desc', function (s) { c(parseTG(s)); }); }));
         }
         if (imdb) {
-            if (srcOn('torrentio')) tasks.push(track('torrentio', function (c) {
-                var path = isSeries ? 'series/' + imdb + ':' + (parseInt(movie.season_number, 10) || 1) + ':' + (parseInt(movie.episode_number, 10) || 1) : 'movie/' + imdb;
+            if (srcOn('torrentio') && (!isSeries || episode)) tasks.push(track('torrentio', function (c) {
+                var path = isSeries ? 'series/' + imdb + ':' + (season || 1) + ':' + episode : 'movie/' + imdb;
                 fetchJson('https://torrentio.strem.fun/qualityfilter=480p,scr,cam,unknown/stream/' + path + '.json', function (j) { c(parseTorrentio(j)); });
             }));
             if (isSeries && srcOn('eztv')) tasks.push(track('eztv', function (c) { mirrorJson(EZTV_HOSTS, '/api/get-torrents?imdb_id=' + imdb + '&limit=100', function (j) { c(parseEztv(j, object)); }); }));
@@ -1912,7 +1917,7 @@
         safety = setTimeout(fin, 40000);
         tasks.forEach(function (t) { try { t(complete); } catch (e) { complete(null); } });
     }
-        function summary() {
+    function summary() {
         var parts = [], i, s, id;
         for (i = 0; i < SOURCES.length; i++) {
             s = SOURCES[i]; id = s.id;
@@ -1980,7 +1985,7 @@
             try { item.find('.settings-param__descr').text(LAST.text); } catch (e) {}
         });
         registered = true;
-        console.log('[EN Public] настройки зарегистрированы в разделе Парсер (без Modal)');
+        console.log('[EN Public] настройки зарегистрированы в разделе Парсер');
         return true;
     }
     function hook() {
@@ -2010,7 +2015,7 @@
             } catch (e) { stdDone = true; finish(false); }
         };
         Lampa.Parser._en_public_hooked = true;
-        console.log('[EN Public] hooked v1.4.0 (merged into EN Sources 2.4.0)');
+        console.log('[EN Public] hooked v1.6.0 (merged into EN Sources 2.6.0)');
         return true;
     }
     function start() {
