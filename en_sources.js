@@ -1661,3 +1661,266 @@
 
     boot();
 })(window, document);
+(function () {
+    'use strict';
+    if (window.en_public_plugin) return;
+    window.en_public_plugin = true;
+
+    var PREFIX = 'en_pub_';
+    var SOURCES = [
+        { id: 'torrentio', title: 'Torrentio',     def: true,  proxy: false },
+        { id: 'nyaa',      title: 'Nyaa.si',       def: true,  proxy: true  },
+        { id: 'anidex',    title: 'AniDex',        def: true,  proxy: false },
+        { id: 'yts',       title: 'YTS',           def: true,  proxy: false },
+        { id: 'eztv',      title: 'EZTV',          def: true,  proxy: false },
+        { id: 'tg',        title: 'TorrentGalaxy', def: false, proxy: true  }
+    ];
+
+    function start() {
+        var comp = 'en_sources';
+        function addParam(component, param, field) {
+            try { Lampa.SettingsApi.addParam({ component: component, param: param, field: field }); return true; }
+            catch (e) { return false; }
+        }
+        try {
+            Lampa.Lang.add({
+                en_pub_title: { ru: 'Публичные трекеры (EN)', en: 'Public trackers (EN)', uk: 'Публічні трекери (EN)' },
+                en_pub_descr: { ru: 'Добавлять результаты публичных зарубежных трекеров к поиску Lampa', en: 'Append public foreign tracker results to Lampa search', uk: 'Додавати результати публічних зарубіжних трекерів до пошуку Lampa' }
+            });
+        } catch (e) {}
+        var title = 'Публичные трекеры (EN)';
+        try { title = Lampa.Lang.translate('en_pub_title'); } catch (e) {}
+        if (!addParam(comp, { name: PREFIX + 'section', type: 'title' }, { name: title })) {
+            comp = 'parser';
+            addParam(comp, { name: PREFIX + 'section', type: 'title' }, { name: title });
+        }
+        addParam(comp, { name: PREFIX + 'enabled', type: 'trigger', default: true }, { name: title, description: 'Добавлять результаты шести публичных трекеров к поиску' });
+        SOURCES.forEach(function (s) {
+            addParam(comp, { name: PREFIX + 'src_' + s.id, type: 'trigger', default: s.def }, { name: s.title });
+        });
+        try { window.__lampa_en_sources_v2__.public = '1.1.0'; } catch (e) {}
+
+        function truthy(v) { return v === true || v === 'true' || v === 1 || v === '1'; }
+        function enabled() { return truthy(Lampa.Storage.get(PREFIX + 'enabled', true)); }
+        function srcOn(id) {
+            var def = true, i;
+            for (i = 0; i < SOURCES.length; i++) if (SOURCES[i].id === id) def = SOURCES[i].def;
+            var v = Lampa.Storage.get(PREFIX + 'src_' + id);
+            return v === undefined || v === null ? def : truthy(v);
+        }
+        function proxyUrl(url, need) {
+            if (!need) return url;
+            try { if (Lampa.Platform.is('android')) return url; } catch (e) {}
+            var p = String(Lampa.Storage.get('en_sources_v2_proxy', '') || '');
+            if (!p) p = 'https://corsproxy.io/?url=';
+            if (p.indexOf('://') < 0) p = 'https://' + p;
+            return p.indexOf('{url}') >= 0 ? p.replace('{url}', encodeURIComponent(url)) : p + encodeURIComponent(url);
+        }
+        function getText(url, need, cb) {
+            var n = new Lampa.Reguest(); n.timeout(15000);
+            n.native(proxyUrl(url, need), function (s) { cb(s); }, function () { cb(null); }, false, { dataType: 'text' });
+        }
+        function getJson(url, need, cb) {
+            var n = new Lampa.Reguest(); n.timeout(15000);
+            n.silent(proxyUrl(url, need), function (j) { cb(j); }, function () { cb(null); }, false, {});
+        }
+        function parseSize(str) {
+            if (str == null) return 0;
+            if (typeof str === 'number') return str;
+            var m = String(str).replace(',', '.').match(/([\d.]+)\s*([KMGT])?i?B/i);
+            if (!m) return 0;
+            var num = parseFloat(m[1]);
+            if (isNaN(num)) return 0;
+            var mult = { k: 1024, m: 1048576, g: 1073741824, t: 1099511627776 };
+            return Math.round(num * (mult[(m[2] || '').toLowerCase()] || 1));
+        }
+        function makeItem(o) {
+            var hash = String(o.hash || '').toLowerCase();
+            if (!hash) { var hm = String(o.magnet || '').match(/btih:([a-fA-F0-9]{40})/i); if (hm) hash = hm[1].toLowerCase(); }
+            var size = typeof o.size === 'number' ? o.size : parseSize(o.size);
+            var date = o.date ? new Date(o.date).getTime() : Date.now();
+            if (isNaN(date)) date = Date.now();
+            var human = '';
+            try { if (Lampa.Utils && Lampa.Utils.bytesToSize) human = Lampa.Utils.bytesToSize(size); } catch (e) {}
+            if (!human && size) human = (size / 1073741824).toFixed(2) + ' ГБ';
+            return {
+                Title: o.title || 'Unknown', Tracker: o.tracker || 'EN',
+                Seeders: parseInt(o.seeds, 10) || 0, Peers: parseInt(o.peers, 10) || 0,
+                Size: size, size: human, MagnetUri: o.magnet || '', Link: o.magnet || o.link || '',
+                PublishDate: date, PublisTime: date, hash: hash || o.magnet || o.title, en_public: true
+            };
+        }
+        function xmlText(node, name) {
+            var all = node.getElementsByTagName('*'), i, ln;
+            for (i = 0; i < all.length; i++) {
+                ln = all[i].localName || String(all[i].nodeName || '').split(':').pop();
+                if (ln === name) return String(all[i].textContent || all[i].text || '').replace(/^\s+|\s+$/g, '');
+            }
+            return '';
+        }
+        function parseNyaa(str) {
+            var items = [];
+            if (!str || typeof DOMParser === 'undefined') return items;
+            try {
+                var doc = new DOMParser().parseFromString(str, 'text/xml');
+                var all = doc.getElementsByTagName('*'), i, ln, it, title, hash;
+                for (i = 0; i < all.length; i++) {
+                    ln = all[i].localName || String(all[i].nodeName || '').split(':').pop();
+                    if (ln !== 'item') continue;
+                    it = all[i]; title = xmlText(it, 'title'); hash = xmlText(it, 'infoHash').toLowerCase();
+                    if (!hash) continue;
+                    items.push(makeItem({
+                        title: title, tracker: 'Nyaa', seeds: xmlText(it, 'seeders'), peers: xmlText(it, 'leechers'),
+                        size: parseSize(xmlText(it, 'size')), date: xmlText(it, 'pubDate'), hash: hash,
+                        magnet: 'magnet:?xt=urn:btih:' + hash + '&dn=' + encodeURIComponent(title) + '&tr=' + encodeURIComponent('http://nyaa.tracker.wf:7777/announce')
+                    }));
+                }
+            } catch (e) { console.log('[EN Public] nyaa', e); }
+            return items;
+        }
+        function parseAnidex(json) {
+            var items = [];
+            var list = json && (json.length ? json : json.torrents);
+            (list || []).forEach(function (t) {
+                if (!t || !t.magnet) return;
+                items.push(makeItem({
+                    title: t.torrent_name, tracker: 'AniDex' + (t.lang_name ? ' (' + t.lang_name + ')' : ''),
+                    seeds: t.seeded, peers: t.leechers, size: parseSize(t.size), date: t.date_uploaded || '', hash: t.hash, magnet: t.magnet
+                }));
+            });
+            return items;
+        }
+        function parseYts(json) {
+            var items = [];
+            if (json && json.data && json.data.movies) json.data.movies.forEach(function (m) {
+                (m.torrents || []).forEach(function (t) {
+                    items.push(makeItem({
+                        title: m.title + ' (' + m.year + ') [' + t.quality + '] [' + t.type + '] [YTS]', tracker: 'YTS',
+                        seeds: t.seeds, peers: t.peers, size: t.size, date: t.date_uploaded || '', hash: t.hash,
+                        magnet: t.url || ('magnet:?xt=urn:btih:' + t.hash)
+                    }));
+                });
+            });
+            return items;
+        }
+        function parseEztv(json, object) {
+            var items = [], movie = object.movie || {};
+            var season = parseInt(movie.season_number, 10) || 0;
+            var episode = parseInt(movie.episode_number, 10) || 0;
+            if (json && json.torrents) json.torrents.forEach(function (t) {
+                if (season && parseInt(t.season, 10) !== season) return;
+                if (episode && parseInt(t.episode, 10) !== episode) return;
+                var magnet = t.torrent_url && t.torrent_url.indexOf('magnet:') === 0 ? t.torrent_url : 'magnet:?xt=urn:btih:' + t.hash;
+                items.push(makeItem({
+                    title: t.filename || t.title, tracker: 'EZTV', seeds: t.seeds, peers: t.peers,
+                    size: parseInt(t.size_bytes, 10) || parseSize(t.small_size),
+                    date: t.date_released_unix ? parseInt(t.date_released_unix, 10) * 1000 : '', hash: t.hash, magnet: magnet
+                }));
+            });
+            return items;
+        }
+        function parseTorrentio(json) {
+            var items = [];
+            if (json && json.streams) json.streams.forEach(function (s) {
+                if (!s.infoHash) return;
+                var name = String(s.name || '').replace(/\n/g, ' ').replace(/^\s+|\s+$/g, '');
+                var info = String(s.title || '').replace(/\n/g, ' ').replace(/^\s+|\s+$/g, '');
+                var seeds = info.match(/👤\s*([\d\s.,]+)/) || info.match(/seeds?\s*:?\s*([\d\s.,]+)/i);
+                var size = info.match(/💾\s*([\d.,]+\s*[KMGT]?B)/i) || info.match(/size\s*:?\s*([\d.,]+\s*[KMGT]?B)/i);
+                var src = info.match(/⚙️\s*(.+)$/);
+                var srcs = src ? src[1].replace(/^\s+|\s+$/g, '') : '';
+                items.push(makeItem({
+                    title: (name ? name + ' ' : '') + (srcs ? '— ' + srcs + ' ' : '') + '[EN]',
+                    tracker: srcs ? srcs.split(':')[0].replace(/^\s+|\s+$/g, '') : 'Torrentio',
+                    seeds: seeds ? parseInt(seeds[1].replace(/[^\d]/g, ''), 10) : 0,
+                    size: parseSize(size ? size[1] : ''), hash: s.infoHash,
+                    magnet: 'magnet:?xt=urn:btih:' + s.infoHash + (s.fileIdx !== undefined ? '&so=' + s.fileIdx : '') + '&dn=' + encodeURIComponent(name || 'EN')
+                }));
+            });
+            return items;
+        }
+        function parseTG(str) {
+            var items = [], $ = window.jQuery || window.$;
+            if (!str || !$) return items;
+            try {
+                $(str).find('div.tgxtablerow, div.tgxtablelist').each(function () {
+                    var row = $(this);
+                    var magnet = row.find('a[href^="magnet:"]').attr('href');
+                    var title = row.find('div#click a, a.txlight, div#click').first().text().replace(/^\s+|\s+$/g, '');
+                    if (!magnet || !title) return;
+                    items.push(makeItem({
+                        title: title, tracker: 'TorrentGalaxy',
+                        seeds: row.find('font[color="green"] b, span[title="Seeders"]').first().text(),
+                        peers: row.find('font[color="#ff0000"] b, span[title="Leechers"]').first().text(),
+                        size: parseSize(row.find('span.badge-secondary').first().text()), magnet: magnet
+                    }));
+                });
+            } catch (e) { console.log('[EN Public] tg', e); }
+            return items;
+        }
+        function search(object, cb) {
+            var movie = object.movie || {};
+            var isSeries = !!movie.number_of_seasons;
+            var q = String(movie.original_title || movie.original_name || object.search || movie.title || '').replace(/^\s+|\s+$/g, '');
+            var imdb = String(movie.imdb_id || '');
+            if (/^\d+$/.test(imdb)) imdb = 'tt' + ('0000000' + imdb).slice(-7);
+            if (!/^tt\d{7,10}$/.test(imdb)) imdb = '';
+            var tasks = [], items = [], done = 0, finished = false, safety;
+            function fin() { if (finished) return; finished = true; clearTimeout(safety); cb(items); }
+            function complete(res) { if (res && res.length) items = items.concat(res); done++; if (done >= tasks.length) fin(); }
+            if (q) {
+                if (srcOn('nyaa')) tasks.push(function (cb2) { getText('https://nyaa.si/?page=rss&c=1_2&s=seeders&o=desc&q=' + encodeURIComponent(q), true, function (s) { cb2(parseNyaa(s)); }); });
+                if (srcOn('anidex')) tasks.push(function (cb2) { getJson('https://anidex.info/api/?q=' + encodeURIComponent(q) + '&s=seeders&o=desc', false, function (j) { cb2(parseAnidex(j)); }); });
+                if (!isSeries && srcOn('yts')) tasks.push(function (cb2) { getJson('https://yts.mx/api/v2/list_movies.json?query_term=' + encodeURIComponent(q) + '&limit=50', false, function (j) { cb2(parseYts(j)); }); });
+                if (srcOn('tg')) tasks.push(function (cb2) { getText('https://torrentgalaxy.to/torrents.php?search=' + encodeURIComponent(q) + '&sort=seeders&order=desc', true, function (s) { cb2(parseTG(s)); }); });
+            }
+            if (imdb) {
+                if (srcOn('torrentio')) tasks.push(function (cb2) {
+                    var path = isSeries ? 'series/' + imdb + ':' + (parseInt(movie.season_number, 10) || 1) + ':' + (parseInt(movie.episode_number, 10) || 1) : 'movie/' + imdb;
+                    getJson('https://torrentio.strem.fun/qualityfilter=480p,scr,cam,unknown/stream/' + path + '.json', false, function (j) { cb2(parseTorrentio(j)); });
+                });
+                if (isSeries && srcOn('eztv')) tasks.push(function (cb2) { getJson('https://eztvx.to/api/get-torrents?imdb_id=' + imdb + '&limit=100', false, function (j) { cb2(parseEztv(j, object)); }); });
+            }
+            if (!tasks.length) { fin(); return; }
+            safety = setTimeout(fin, 25000);
+            tasks.forEach(function (t) { try { t(complete); } catch (e) { complete(null); } });
+        }
+        function hook() {
+            if (!window.Lampa || !Lampa.Parser || typeof Lampa.Parser.get !== 'function') return false;
+            if (Lampa.Parser._en_public_hooked) return true;
+            var orig = Lampa.Parser.get;
+            Lampa.Parser.get = function (object, oncomplite, onerror) {
+                if (!enabled()) return orig.call(this, object, oncomplite, onerror);
+                var self = this, called = false, pubDone = false, stdDone = false, pub = [], std = null;
+                var guard = setTimeout(function () { finish(true); }, 30000);
+                function deliver(data) { if (called) return; called = true; clearTimeout(guard); try { oncomplite(data); } catch (e) { console.log('[EN Public] oncomplite', e); } }
+                function finish(force) {
+                    if (called) return;
+                    if (!force && (!pubDone || !stdDone)) return;
+                    var res = ((std && std.Results) || []).concat(pub);
+                    var seen = {}, out = [], i, k;
+                    for (i = 0; i < res.length; i++) {
+                        k = String(res[i].hash || res[i].MagnetUri || res[i].Title || i);
+                        if (!seen[k]) { seen[k] = true; out.push(res[i]); }
+                    }
+                    console.log('[EN Public] results:', out.length, '(public:', pub.length + ')');
+                    deliver({ Results: out });
+                }
+                search(object, function (items) { pub = items || []; pubDone = true; finish(false); });
+                try {
+                    orig.call(self, object, function (data) { std = data; stdDone = true; finish(false); }, function () { stdDone = true; finish(false); });
+                } catch (e) { stdDone = true; finish(false); }
+            };
+            Lampa.Parser._en_public_hooked = true;
+            console.log('[EN Public] hooked v1.1.0 (merged into EN Sources 2.1.0)');
+            return true;
+        }
+        var tries = 0, t = setInterval(function () { tries++; if (hook() || tries > 120) clearInterval(t); }, 500);
+    }
+
+    if (window.appready) { start(); return; }
+    var booted = false;
+    function go() { if (!booted) { booted = true; start(); } }
+    if (window.Lampa && Lampa.Listener && Lampa.Listener.follow) Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') go(); });
+    var w = 0, bt = setInterval(function () { w++; if (window.appready) { clearInterval(bt); go(); } else if (w > 120) clearInterval(bt); }, 500);
+})();
