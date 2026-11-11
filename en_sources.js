@@ -1703,7 +1703,6 @@
         for (var i = 0; i < PROXY_FALLBACKS.length; i++) list.push(PROXY_FALLBACKS[i]);
         return list;
     }
-    }
     function wrapProxy(u, p) {
         if (!p) return u;
         if (p.indexOf('://') < 0) p = 'https://' + p;
