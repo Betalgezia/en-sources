@@ -522,6 +522,15 @@
         });
     }
 
+    function normTitle(s) {
+        return String(s == null ? '' : s)
+            .toLowerCase()
+            .replace(/[\u2018\u2019\u201A\u201B\u02BC]/g, "'")
+            .replace(/[\u201C\u201D\u201E]/g, '"')
+            .replace(/\s+/g, ' ')
+            .replace(/^\s+|\s+$/g, '');
+    }
+
     function anilistTitles(query, callback) {
         var body = JSON.stringify({
             query: 'query($s:String){Page(perPage:4){media(search:$s,type:ANIME){' +
@@ -533,14 +542,22 @@
             if (err || !json) { callback(out); return; }
             try {
                 var media = json.data.Page.media || [];
-                var ql = query.toLowerCase();
+                var ql = normTitle(query);
 
                 // Вперёд — результат с английским названием, точно совпадающим
                 // с запросом (основной сериал, а не спин-оффы/сиквелы).
+                // Сравниваем нормализованные строки: у AniList апостроф
+                // типографский (’), у TMDB — прямой (').
                 media.sort(function (a, b) {
-                    var ae = String((a.title && a.title.english) || '').toLowerCase() === ql ? 0 : 1;
-                    var be = String((b.title && b.title.english) || '').toLowerCase() === ql ? 0 : 1;
-                    return ae - be;
+                    var ae = normTitle(a.title && a.title.english);
+                    var be = normTitle(b.title && b.title.english);
+                    var aExact = ae === ql ? 0 : 1;
+                    var bExact = be === ql ? 0 : 1;
+                    if (aExact !== bExact) return aExact - bExact;
+                    // при прочих равных — короче ромадзи (основной сериал)
+                    var ar = normTitle(a.title && a.title.romaji);
+                    var br = normTitle(b.title && b.title.romaji);
+                    return ar.length - br.length;
                 });
 
                 for (var i = 0; i < media.length; i++) {
