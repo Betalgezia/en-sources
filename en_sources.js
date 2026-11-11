@@ -573,9 +573,12 @@
 
         resolveTitles(base, function (titles) {
             var out = [];
-            if (base.length) pushQuery(out, base[0]);
+            // Ромадзи/английское из Shikimori/AniList — лучший запрос для
+            // Nyaa и AniDex (там раздачи называются ромадзи, а не полным
+            // английским названием TMDB).
             for (var i = 0; i < titles.length; i++) pushQuery(out, titles[i]);
-            for (var j = 1; j < base.length; j++) pushQuery(out, base[j]);
+            // Затем названия карточки (search_two, original_name, title, ...).
+            for (var j = 0; j < base.length; j++) pushQuery(out, base[j]);
             out = out.slice(0, 6).sort(function (a, b) { return queryScore(a) - queryScore(b); });
             callback(out.length ? out : [queryFor(object)]);
         });
@@ -820,22 +823,29 @@
         var isSeries = !!(movie.number_of_seasons || movie.original_name || movie.name || movie.first_air_date);
         var season = int(movie.season_number, 0);
         var cat = anime ? '1_2' : '4_1';
-        var q0 = queries[0] || queryFor(object);
-        if (!q0) { done([], []); return; }
 
-        var qlist = [q0];
-        if (isSeries && season > 0) {
-            var sn = ('0' + season).slice(-2);
-            qlist.push(q0 + ' S' + sn);
-            qlist.push(q0 + ' season ' + season);
+        var cands = (queries && queries.length ? queries : [queryFor(object)]).slice(0, 3);
+        if (!cands.length) { done([], []); return; }
+
+        // Все кандидаты (ромадзи, английский, японский...). Для первого
+        // (лучшего) дополнительно ищем сезонные паки и батчи.
+        var qlist = [];
+        for (var c = 0; c < cands.length; c++) {
+            qlist.push(cands[c]);
+            if (c === 0) {
+                if (isSeries && season > 0) {
+                    qlist.push(cands[c] + ' S' + ('0' + season).slice(-2));
+                    qlist.push(cands[c] + ' season ' + season);
+                }
+                if (isSeries) qlist.push(cands[c] + ' batch');
+            }
         }
-        if (isSeries) qlist.push(q0 + ' batch');
 
         var seen = {};
         var unique = [];
         for (var q = 0; q < qlist.length; q++) {
             var key = qlist[q].toLowerCase();
-            if (!seen[key] && unique.length < 4) { seen[key] = true; unique.push(qlist[q]); }
+            if (!seen[key] && unique.length < 6) { seen[key] = true; unique.push(qlist[q]); }
         }
 
         var all = [];
@@ -882,27 +892,52 @@
     /* ------------------------------------------------------------------ */
 
     function anidexSearch(object, queries, done, bag) {
-        var q = queries[0] || queryFor(object);
-        if (!q) { done([], []); return; }
-        requestJson('https://anidex.info/api/?q=' + encodeURIComponent(q) + '&s=seeders&o=desc',
-            function (err, json) {
-                if (err) { done([], [err]); return; }
-                var list = json && (json.length ? json : (json.torrents || null));
-                if (!list || Object.prototype.toString.call(list) !== '[object Array]') { done([], []); return; }
-                var out = [];
-                for (var i = 0; i < list.length; i++) {
-                    var t = list[i] || {};
-                    if (!t || !t.magnet) continue;
-                    out.push(makeItem({
-                        title: t.torrent_name || t.name,
-                        tracker: 'AniDex' + (t.lang_name ? ' (' + t.lang_name + ')' : ''),
-                        seeds: t.seeded, peers: t.leechers,
-                        size: parseSize(t.size), date: t.date_uploaded || '',
-                        hash: t.hash, magnet: t.magnet, link: ''
-                    }));
-                }
-                done(out, []);
-            }, bag);
+        var cands = (queries && queries.length ? queries : [queryFor(object)]).slice(0, 3);
+        var idx = 0;
+        var finished = false;
+
+        function finish(items, errors) {
+            if (finished) return;
+            finished = true;
+            done(items || [], errors || []);
+        }
+
+        function next() {
+            if (finished) return;
+            if (idx >= cands.length) { finish([], []); return; }
+            var q = cands[idx++];
+            requestJson('https://anidex.info/api/?q=' + encodeURIComponent(q) + '&s=seeders&o=desc',
+                function (err, json) {
+                    if (finished) return;
+                    if (err || !json) { next(); return; }
+                    var list = json && (json.length ? json : (json.torrents || null));
+                    if (!list || Object.prototype.toString.call(list) !== '[object Array]' || !list.length) {
+                        next();
+                        return;
+                    }
+                    var out = [];
+                    for (var i = 0; i < list.length; i++) {
+                        var t = list[i] || {};
+                        var hash = String(t.hash || t.info_hash || '').toLowerCase();
+                        var magnet = t.magnet || t.link || '';
+                        if (!magnet && /^[a-f0-9]{40}$/.test(hash)) {
+                            magnet = magnetFor(hash, t.torrent_name || t.name || t.title);
+                        }
+                        if (!magnet) continue;
+                        out.push(makeItem({
+                            title: t.torrent_name || t.name || t.title,
+                            tracker: 'AniDex' + (t.lang_name ? ' (' + t.lang_name + ')' : ''),
+                            seeds: (t.seeders != null ? t.seeders : (t.seeded != null ? t.seeded : t.seeds)),
+                            peers: (t.leechers != null ? t.leechers : t.peers),
+                            size: parseSize(t.size), date: t.date_uploaded || t.date || '',
+                            hash: hash, magnet: magnet, link: ''
+                        }));
+                    }
+                    finish(out, []);
+                }, bag);
+        }
+
+        next();
     }
 
     function parseTorrentio(json) {
@@ -1090,17 +1125,32 @@
     }
 
     function tpbSearch(object, queries, done, bag) {
-        var q = queries[0] || queryFor(object);
-        if (!q) { done([], []); return; }
-        requestJson('https://apibay.org/q.php?q=' + encodeURIComponent(q),
-            function (err, json) {
-                if (err) { done([], [err]); return; }
-                if (!json || Object.prototype.toString.call(json) !== '[object Array]' || !json.length) {
-                    done([], []);
-                    return;
-                }
-                done(parseTpb(json), []);
-            }, bag);
+        var cands = (queries && queries.length ? queries : [queryFor(object)]).slice(0, 2);
+        var idx = 0;
+        var finished = false;
+
+        function finish(items, errors) {
+            if (finished) return;
+            finished = true;
+            done(items || [], errors || []);
+        }
+
+        function next() {
+            if (finished) return;
+            if (idx >= cands.length) { finish([], []); return; }
+            var q = cands[idx++];
+            requestJson('https://apibay.org/q.php?q=' + encodeURIComponent(q),
+                function (err, json) {
+                    if (finished) return;
+                    if (err || !json || Object.prototype.toString.call(json) !== '[object Array]' || !json.length) {
+                        next();
+                        return;
+                    }
+                    finish(parseTpb(json), []);
+                }, bag);
+        }
+
+        next();
     }
 
     /* ------------------------------------------------------------------ */
