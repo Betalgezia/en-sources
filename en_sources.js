@@ -61,6 +61,7 @@
         merge: PREFIX + 'merge',
         fallback: PREFIX + 'fallback',
         prefer_en: PREFIX + 'prefer_en',
+        batches_first: PREFIX + 'batches_first',
         hide_ru: PREFIX + 'hide_ru',
         timeout: PREFIX + 'timeout'
     };
@@ -194,6 +195,7 @@
         cfg.merge = bool(K.merge, true);
         cfg.fallback = bool(K.fallback, true);
         cfg.prefer_en = bool(K.prefer_en, true);
+        cfg.batches_first = bool(K.batches_first, true);
         cfg.hide_ru = bool(K.hide_ru, false);
         cfg.timeout = int(str(K.timeout, '20'), 20);
         if (cfg.timeout < 8) cfg.timeout = 8;
@@ -685,11 +687,38 @@
         return out;
     }
 
+    // Батч/полный сезон/полная серия. Одиночные эпизоды (S02E09, "S2 - 02",
+    // "2nd Season - 09") сюда не попадают.
+    function isBatch(title) {
+        var t = String(title || '');
+
+        // Явные слова-маркеры
+        if (/\b(batch|complete|completo|all[ .-]?seasons?|all[ .-]?episodes?|full[ .-]?(season|series)|entire[ .-]?series)\b/i.test(t)) return true;
+
+        // Диапазон сезонов: S01-S04 / S1 ~ S4 / Season 1-4
+        if (/\bS\d{1,2}\s*[-–—~]\s*S\d{1,2}\b/i.test(t)) return true;
+        if (/\bSeason\s*\d+\s*[-–—~]\s*\d+\b/i.test(t)) return true;
+
+        // Сезонный пак без конкретного эпизода: "Season 1", "S02", "2nd Season",
+        // но НЕ "S2 - 02", "Season 2 - 09", "E09", "Episode 5".
+        var hasSeason = /\b(?:Season\s*\d+|S\d{1,2})\b/i.test(t);
+        if (!hasSeason) return false;
+        var hasEpisode = /\b(?:E\d{1,3}|Episode\s*\d+|Ep\s*\d+)\b/i.test(t) ||
+            /\bS\d{1,2}\s*[-–—]\s*\d{1,3}\b/i.test(t) ||
+            /\bSeason\s*\d*\s*[-–—]\s*\d+\b/i.test(t);
+        return !hasEpisode;
+    }
+
     function compareForeign(a, b) {
         if (cfg.prefer_en) {
             var ea = a.en_audio === true ? 0 : 1;
             var eb = b.en_audio === true ? 0 : 1;
             if (ea !== eb) return ea - eb;
+        }
+        if (cfg.batches_first) {
+            var ba = isBatch(a.Title) ? 1 : 0;
+            var bb = isBatch(b.Title) ? 1 : 0;
+            if (ba !== bb) return bb - ba;
         }
         return (b.Seeders || 0) - (a.Seeders || 0);
     }
@@ -1577,6 +1606,19 @@
                     }
                     if (!foreign.length) return;
 
+                    // внутри зарубежных: батчи/полные сезоны первыми (по сидам),
+                    // остальные — в порядке, который уже выставил Lampa
+                    if (cfg.batches_first) {
+                        for (var fi = 0; fi < foreign.length; fi++) foreign[fi].__en_idx = fi;
+                        foreign.sort(function (a, b) {
+                            var ba = isBatch(a.Title) ? 1 : 0;
+                            var bb = isBatch(b.Title) ? 1 : 0;
+                            if (ba !== bb) return bb - ba;
+                            if (ba) return (b.Seeders || 0) - (a.Seeders || 0);
+                            return (a.__en_idx || 0) - (b.__en_idx || 0);
+                        });
+                    }
+
                     data.Results.length = 0;
                     for (var f = 0; f < foreign.length; f++) data.Results.push(foreign[f]);
                     for (var s = 0; s < standard.length; s++) data.Results.push(standard[s]);
@@ -1642,6 +1684,8 @@
             'Если зарубежные источники ничего не нашли в режиме замены.', null, function () { readConfig(); });
         addParam('prefer_en', 'trigger', true, 'Предпочитать английский (озвучку/сабы)',
             'Сначала релизы с английским дубляжом или английскими субтитрами.', null, function () { readConfig(); });
+        addParam('batches_first', 'trigger', true, 'Батчи/полные сезоны первыми',
+            'Среди зарубежных раздач сначала показывать полные сезоны, серии и паки, затем одиночные эпизоды.', null, function () { readConfig(); });
         addParam('hide_ru', 'trigger', false, 'Скрывать русскую озвучку',
             'Скрывает только явную русскую озвучку/дубляж. Метка [RUS] в субтитрах не скрывает раздачу.', null, function () { readConfig(); });
         addParam('timeout', 'select', '20', 'Таймаут',
@@ -1944,7 +1988,8 @@
         baseQueries: baseQueries,
         isAnimeCard: isAnimeCard,
         cleanQuery: cleanQuery,
-        parseTpbHtml: parseTpbHtml
+        parseTpbHtml: parseTpbHtml,
+        isBatch: isBatch
     };
 
     function boot() {
