@@ -76,6 +76,19 @@
 
     var YTS_HOSTS = ['yts.mx', 'yts.rs', 'yts.ag', 'yts.lt'];
     var EZTV_HOSTS = ['eztvx.to', 'eztv.re', 'eztv.ch'];
+    var TPB_HOSTS = [
+        'apibay.org',
+        'thepiratebay.org',
+        'tpb.party',
+        'thepiratebay.party',
+        'piratebay.party',
+        'piratebay.live',
+        'thepiratebay.bond',
+        'thehiddenbay.com',
+        'thepiratebay10.info',
+        'thepiratebay11.com',
+        'thepiratebay.xyz'
+    ];
 
     var RU_AUDIO_RE = /(rus|russian|русск|рус\.)[^\n]{0,45}(dub|dubbed|dubbing|audio|mvo|\bvo\b|озвуч|дубл|закадр)|(dub|dubbed|dubbing|audio|mvo|\bvo\b|озвуч|дубл|закадр)[^\n]{0,45}(rus|russian|русск|рус\.)/i;
     var DUB_RE = /\b(dub|dubbed|dual[ .-]?audio|english[ .-]?dub|eng[ .-]?dub)\b/i;
@@ -488,29 +501,30 @@
     }
 
     /* ------------------------------------------------------------------ */
-    /* Названия аниме: Shikimori -> AniList                                */
+    /* Названия аниме: AniList -> Shikimori                                */
     /* ------------------------------------------------------------------ */
 
     function shikimoriTitles(query, callback) {
         requestJson('https://shikimori.io/api/animes?search=' +
             encodeURIComponent(query) + '&limit=5', function (err, json) {
             var out = [];
-            if (err || !json || Object.prototype.toString.call(json) !== '[object Array]') {
+            if (err || !json || Object.prototype.toString.call(json) !== '[object Array]' || !json.length) {
                 callback(out);
                 return;
             }
-            for (var i = 0; i < json.length; i++) {
-                var a = json[i] || {};
-                if (a.name) out.push(a.name);
-                if (a.english) out.push(a.english);
-            }
+            // Shikimori часто возвращает ложные совпадения (например, для
+            // "Frieren: Beyond Journey's End" вторым идёт "Gundam Wing").
+            // Берём только первый (наиболее релевантный) результат.
+            var a = json[0] || {};
+            if (a.name) out.push(a.name);
+            if (a.english) out.push(a.english);
             callback(out);
         });
     }
 
     function anilistTitles(query, callback) {
         var body = JSON.stringify({
-            query: 'query($s:String){Page(perPage:3){media(search:$s,type:ANIME){' +
+            query: 'query($s:String){Page(perPage:4){media(search:$s,type:ANIME){' +
                 'title{romaji english} synonyms}}}',
             variables: { s: query }
         });
@@ -519,6 +533,16 @@
             if (err || !json) { callback(out); return; }
             try {
                 var media = json.data.Page.media || [];
+                var ql = query.toLowerCase();
+
+                // Вперёд — результат с английским названием, точно совпадающим
+                // с запросом (основной сериал, а не спин-оффы/сиквелы).
+                media.sort(function (a, b) {
+                    var ae = String((a.title && a.title.english) || '').toLowerCase() === ql ? 0 : 1;
+                    var be = String((b.title && b.title.english) || '').toLowerCase() === ql ? 0 : 1;
+                    return ae - be;
+                });
+
                 for (var i = 0; i < media.length; i++) {
                     var t = media[i].title || {};
                     if (t.romaji) out.push(t.romaji);
@@ -557,9 +581,10 @@
             callback(out);
         }
 
-        shikimoriTitles(base[0], function (titles) {
+        // AniList ищет точнее (по английскому/ромадзи), Shikimori — запасной.
+        anilistTitles(base[0], function (titles) {
             if (titles && titles.length) { finish(titles); return; }
-            anilistTitles(base[0], function (more) { finish(more || []); });
+            shikimoriTitles(base[0], function (more) { finish(more || []); });
         });
     }
 
@@ -1107,6 +1132,14 @@
         next();
     }
 
+    function stripTags(s) {
+        return String(s == null ? '' : s).replace(/<[^>]*>/g, '');
+    }
+
+    function looksTpbHtml(text) {
+        return /detLink|searchResult|magnet:\?xt=urn:btih:/i.test(String(text || ''));
+    }
+
     function parseTpb(json) {
         var out = [];
         for (var i = 0; i < json.length; i++) {
@@ -1124,9 +1157,54 @@
         return out;
     }
 
+    /*
+     * HTML-выдача thepiratebay.org и её зеркал. Название берём из
+     * <a class="detLink">, magnet/инфохаш — из <a href="magnet:...">,
+     * сиды/личи — два <td align="right">.
+     */
+    function parseTpbHtml(text) {
+        var out = [];
+        var rows = String(text || '').split(/<tr[^>]*>/i);
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+
+            var titleLink = row.match(/<a[^>]*class=["']?detLink["']?[^>]*>([\s\S]*?)<\/a>/i);
+            var title = titleLink ? clean(decodeXml(stripTags(titleLink[1]))) : '';
+            if (!title) continue;
+
+            var mag = row.match(/href="(magnet:\?xt=urn:btih:[a-fA-F0-9]{40}[^"]*)"/i);
+            if (!mag) continue;
+            var magnet = decodeXml(mag[1]);
+            var hm = magnet.match(/btih:([a-fA-F0-9]{40})/);
+            if (!hm) continue;
+
+            var size = 0;
+            var desc = row.match(/<font[^>]*class=["']?detDesc["']?[^>]*>([\s\S]*?)<\/font>/i);
+            if (desc) {
+                var sz = desc[1].match(/Size\s+([\d.,]+\s*[KMGT]?i?B)/i);
+                if (sz) size = parseSize(sz[1]);
+            }
+
+            var nums = [];
+            var reN = /<td[^>]*align=["']?right["']?[^>]*>([\s\S]*?)<\/td>/gi;
+            var m;
+            while ((m = reN.exec(row)) !== null) {
+                nums.push(int(String(stripTags(m[1])).replace(/[^\d]/g, ''), 0));
+            }
+
+            out.push(makeItem({
+                title: title, tracker: 'TPB',
+                seeds: nums[0] || 0, peers: nums[1] || 0,
+                size: size, hash: hm[1], magnet: magnet, link: ''
+            }));
+        }
+        return out;
+    }
+
     function tpbSearch(object, queries, done, bag) {
         var cands = (queries && queries.length ? queries : [queryFor(object)]).slice(0, 2);
-        var idx = 0;
+        var queryIndex = 0;
+        var hostIndex = 0;
         var finished = false;
 
         function finish(items, errors) {
@@ -1135,22 +1213,41 @@
             done(items || [], errors || []);
         }
 
-        function next() {
+        function nextQuery() {
             if (finished) return;
-            if (idx >= cands.length) { finish([], []); return; }
-            var q = cands[idx++];
-            requestJson('https://apibay.org/q.php?q=' + encodeURIComponent(q),
-                function (err, json) {
-                    if (finished) return;
-                    if (err || !json || Object.prototype.toString.call(json) !== '[object Array]' || !json.length) {
-                        next();
-                        return;
-                    }
-                    finish(parseTpb(json), []);
-                }, bag);
+            queryIndex++;
+            hostIndex = 0;
+            if (queryIndex >= cands.length) { finish([], []); return; }
+            tryHost(cands[queryIndex]);
         }
 
-        next();
+        function tryHost(q) {
+            if (finished) return;
+            if (hostIndex >= TPB_HOSTS.length) { nextQuery(); return; }
+            var host = TPB_HOSTS[hostIndex++];
+
+            // Сначала JSON API (apibay и совместимые), затем HTML-зеркала.
+            requestJson('https://' + host + '/q.php?q=' + encodeURIComponent(q), function (err, json) {
+                if (finished) return;
+                if (!err && json && Object.prototype.toString.call(json) === '[object Array]' && json.length) {
+                    var items = parseTpb(json);
+                    if (items.length) { finish(items, []); return; }
+                }
+
+                var htmlUrl = 'https://' + host + '/search/' + encodeURIComponent(q) + '/1/99/0';
+                requestText(htmlUrl, function (e2, html) {
+                    if (finished) return;
+                    if (!e2) {
+                        var items2 = parseTpbHtml(html);
+                        if (items2.length) { finish(items2, []); return; }
+                    }
+                    tryHost(q);
+                }, bag, looksTpbHtml);
+            }, bag);
+        }
+
+        if (!cands.length) { finish([], []); return; }
+        tryHost(cands[0]);
     }
 
     /* ------------------------------------------------------------------ */
@@ -1604,6 +1701,13 @@
             html += '<p>' + esc(SOURCES[i].title) + ': ' + sourceLine(SOURCES[i].id) + '</p>';
         }
 
+        if (!srcOn('nyaa')) {
+            html += '<h3>Внимание</h3>' +
+                '<p><b>Nyaa.si выключен</b> — это основной источник аниме. ' +
+                'Если в выдаче «один последний эпизод», это результат штатного парсера ' +
+                'Lampa (Jackett/lampa.app), а не Nyaa. Включите Nyaa.si в настройках.</p>';
+        }
+
         if (last) {
             html += '<h3>Последний поиск</h3>' +
                 '<p>Запрос: <b>' + esc(last.query || '—') + '</b><br>' +
@@ -1619,7 +1723,8 @@
 
         html += '<h3>Блокировки</h3>' +
             '<p>Плагин ходит напрямую, без прокси. Добавьте в ваше средство обхода домены:<br>' +
-            '<b>nyaa.si, anidex.info, torrentio.strem.fun, yts.mx, eztvx.to, apibay.org, ' +
+            '<b>nyaa.si, anidex.info, torrentio.strem.fun, yts.mx, eztvx.to, ' +
+            'apibay.org, thepiratebay.org (и его зеркала), ' +
             'shikimori.io, graphql.anilist.co, api.themoviedb.org</b>.<br>' +
             'Если источник отдаёт «сеть/Cloudflare» — его домен не обойдён или недоступен.</p>';
 
@@ -1821,7 +1926,8 @@
         audioState: audioState,
         baseQueries: baseQueries,
         isAnimeCard: isAnimeCard,
-        cleanQuery: cleanQuery
+        cleanQuery: cleanQuery,
+        parseTpbHtml: parseTpbHtml
     };
 
     function boot() {
