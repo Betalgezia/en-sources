@@ -1662,10 +1662,10 @@
     boot();
 })(window, document);
 /*!
- * EN Sources 2.3.0 — модуль публичных трекеров (хвост единого файла)
+ * EN Sources 2.4.0 — модуль публичных трекеров (хвост единого файла)
  * ВСТАВКА: после строки })(window, document); первого модуля.
- * Блок настроек ГАРАНТИРОВАННО в Настройки -> Парсер.
- * Цепочка прокси: твой -> allorigins -> corsproxy -> напрямую.
+ * Без Modal: проверка через Noty + строка состояния, контроллеры не трогаются.
+ * Порядок сети: напрямую -> твой прокси -> allorigins -> corsproxy.
  */
 (function () {
     'use strict';
@@ -1684,7 +1684,7 @@
     ];
     var YTS_HOSTS = ['yts.mx', 'yts.rs', 'yts.ag', 'yts.lt'];
     var EZTV_HOSTS = ['eztvx.to', 'eztv.re', 'eztv.ch'];
-    var LAST = { counts: {}, errors: {}, time: 0 };
+    var LAST = { counts: {}, errors: {}, time: 0, text: 'Проверка ещё не запускалась' };
     window.__en_pub_last = LAST;
     var registered = false;
 
@@ -1696,7 +1696,7 @@
         var v = Lampa.Storage.get(PREFIX + 'src_' + id);
         return v === undefined || v === null ? def : truthy(v);
     }
-       function proxyList() {
+    function proxyList() {
         var list = [''];
         var p = String(Lampa.Storage.get('en_sources_v2_proxy', '') || '');
         if (p) list.push(p);
@@ -1884,7 +1884,7 @@
         if (!/^tt\d{7,10}$/.test(imdb)) imdb = '';
         LAST.counts = {}; LAST.errors = {}; LAST.time = Date.now();
         var tasks = [], items = [], done = 0, finished = false, safety;
-        function fin() { if (finished) return; finished = true; clearTimeout(safety); cb(items); }
+        function fin() { if (finished) return; finished = true; clearTimeout(safety); LAST.text = summary(); cb(items); }
         function complete(res) { if (res && res.length) items = items.concat(res); done++; if (done >= tasks.length) fin(); }
         function track(id, fn) {
             return function (cb2) {
@@ -1925,21 +1925,17 @@
     function testPublic() {
         try { Lampa.Noty.show('Проверяю публичные трекеры...'); } catch (e) {}
         search({ search: 'Plan 9 from Outer Space', movie: { title: 'Plan 9 from Outer Space', original_title: 'Plan 9 from Outer Space', imdb_id: 'tt0052077' } }, function () {
-            var text = summary();
-            console.log('[EN Public] test:', text);
-            try { Lampa.Noty.show(text, { time: 9000 }); } catch (e) {}
-            try {
-                var $ = window.jQuery || window.$;
-                if ($ && Lampa.Modal) Lampa.Modal.open({ title: 'Публичные трекеры', html: $('<div style="padding:1em;line-height:1.6">' + text.replace(/·/g, '<br>') + '</div>'), size: 'medium', onBack: function () { Lampa.Modal.close(); } });
-            } catch (e) {}
+            console.log('[EN Public] test:', LAST.text);
+            try { Lampa.Noty.show(LAST.text, { time: 9000 }); } catch (e) {}
         });
     }
     function register() {
         if (registered) return true;
         if (!window.Lampa || !Lampa.SettingsApi || !Lampa.SettingsApi.addParam) return false;
-        function add(param, field, onChange) {
+        function add(param, field, onChange, onRender) {
             var d = { component: 'parser', param: param, field: field };
             if (onChange) d.onChange = onChange;
+            if (onRender) d.onRender = onRender;
             Lampa.SettingsApi.addParam(d);
         }
         try {
@@ -1952,9 +1948,12 @@
         SOURCES.forEach(function (s) {
             add({ name: PREFIX + 'src_' + s.id, type: 'trigger', default: s.def }, { name: s.title });
         });
-        add({ name: PREFIX + 'test', type: 'button' }, { name: 'Проверить публичные трекеры', description: 'Покажет по каждому трекеру: найдено / ошибка' }, testPublic);
+        add({ name: PREFIX + 'test', type: 'button' }, { name: 'Проверить публичные трекеры', description: 'Результат придёт уведомлением, без окон' }, testPublic);
+        add({ name: PREFIX + 'status', type: 'static' }, { name: 'Состояние проверки', description: ' ' }, null, function (item) {
+            try { item.find('.settings-param__descr').text(LAST.text); } catch (e) {}
+        });
         registered = true;
-        console.log('[EN Public] настройки зарегистрированы в разделе Парсер');
+        console.log('[EN Public] настройки зарегистрированы в разделе Парсер (без Modal)');
         return true;
     }
     function hook() {
@@ -1984,7 +1983,7 @@
             } catch (e) { stdDone = true; finish(false); }
         };
         Lampa.Parser._en_public_hooked = true;
-        console.log('[EN Public] hooked v1.3.0 (merged into EN Sources 2.3.0)');
+        console.log('[EN Public] hooked v1.4.0 (merged into EN Sources 2.4.0)');
         return true;
     }
     function start() {
