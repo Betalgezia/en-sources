@@ -1662,10 +1662,12 @@
     boot();
 })(window, document);
 /*!
- * EN Sources 2.12.0 — модуль публичных трекеров (хвост единого файла)
+ * EN Sources 2.13.0 — модуль публичных трекеров (хвост единого файла)
  * ВСТАВКА: после строки })(window, document); первого модуля.
- * БЕЗ ПРОКСИ. Nyaa HTML-пагинация (все эпизоды). Зарубежные первыми.
- * + search_two/cleanQuery/Shikimori/кэш/точный RU-фильтр/Cloudflare/UA/regex-fallback.
+ * БЕЗ ПРОКСИ. Nyaa для сериалов: HTML-пагинация по новизне (3 страницы)
+ * без RSS fallback + сезонные паки. Для фильмов: HTML + RSS(limit=150, id).
+ * Общий рубильник EN в шапке + под-тумблер публичных.
+ * search_two -> Shikimori -> AniList, кэш. Cloudflare/UA/regex-fallback.
  */
 (function () {
     'use strict';
@@ -1676,13 +1678,13 @@
     var MAX_RESULTS = 250;
     var UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
     var SOURCES = [
-        { id: 'torrentio', title: 'Torrentio',     def: true  },
-        { id: 'nyaa',      title: 'Nyaa.si',       def: true  },
-        { id: 'anidex',    title: 'AniDex',        def: false },
-        { id: 'yts',       title: 'YTS',           def: true  },
-        { id: 'eztv',      title: 'EZTV',          def: true  },
-        { id: 'tg',        title: 'TorrentGalaxy', def: true  },
-        { id: 'tpb',       title: 'The Pirate Bay', def: true }
+        { id: 'torrentio', title: 'Torrentio',      def: true  },
+        { id: 'nyaa',      title: 'Nyaa.si',        def: true  },
+        { id: 'anidex',    title: 'AniDex',         def: false },
+        { id: 'yts',       title: 'YTS',            def: true  },
+        { id: 'eztv',      title: 'EZTV',           def: true  },
+        { id: 'tg',        title: 'TorrentGalaxy',  def: true  },
+        { id: 'tpb',       title: 'The Pirate Bay', def: true  }
     ];
     var YTS_HOSTS = ['yts.mx', 'yts.rs', 'yts.ag', 'yts.lt'];
     var EZTV_HOSTS = ['eztvx.to', 'eztv.re', 'eztv.ch'];
@@ -1699,7 +1701,8 @@
     var resolveCache = {};
 
     function truthy(v) { return v === true || v === 'true' || v === 1 || v === '1'; }
-    function enabled() { return truthy(Lampa.Storage.get(PREFIX + 'enabled', true)); }
+    function globalEn() { return truthy(Lampa.Storage.get('en_sources_v2_enabled', true)); }
+    function enabled() { return truthy(Lampa.Storage.get(PREFIX + 'enabled', true)) && globalEn(); }
     function showRu() { return truthy(Lampa.Storage.get(PREFIX + 'ru', false)); }
     function dubMode() { var v = String(Lampa.Storage.get(PREFIX + 'dub', 'prefer') || 'prefer'); return (v === 'off' || v === 'only') ? v : 'prefer'; }
     function isRuAudio(t) { t = String(t || ''); return RU_AUDIO_RE.test(t) || RU_GROUP_RE.test(t); }
@@ -1759,14 +1762,14 @@
     function isCloudflare(t) { return /just a moment|cf-browser-verification|enable javascript and cookies|attention required/i.test(String(t || '').slice(0, 3000)); }
     function looksJson(t) { var s = String(t || '').replace(/^\uFEFF/, '').replace(/^\s+/, ''); return s.charAt(0) === '{' || s.charAt(0) === '['; }
     function looksNyaaRss(t) { return /<rss[\s>]|<item[\s>]/i.test(String(t || '')); }
-    function looksNyaaHtml(t) { return /torrent-list|nyaa/i.test(String(t || '')) && /magnet:/i.test(String(t || '')); }
 
     function fetchText(url, cb, validator) {
         var n = new Lampa.Reguest(); n.timeout(15000);
         var params = { dataType: 'text', headers: { 'Accept': 'text/xml,application/xml,text/html,*/*' } };
         if (isAndroid()) { params.headers['User-Agent'] = UA; params.headers['Accept-Language'] = 'en-US,en;q=0.9,ru;q=0.8'; }
         n.native(url, function (s) {
-            if (s && !isCloudflare(s) && (!validator || validator(s))) cb(s); else cb(null);
+            if (!s || isCloudflare(s) || (validator && !validator(s))) { cb(null); return; }
+            cb(s);
         }, function () { cb(null); }, false, params);
     }
     function fetchJson(url, cb) {
@@ -1926,7 +1929,7 @@
                 var it = nyaaItemFrom({ title: xmlText(nodes[i], 'title'), hash: xmlText(nodes[i], 'infoHash'), seeders: xmlText(nodes[i], 'seeders'), leechers: xmlText(nodes[i], 'leechers'), size: xmlText(nodes[i], 'size'), date: xmlText(nodes[i], 'pubDate'), id: idm ? idm[1] : '' });
                 if (it) out.push(it);
             }
-            return out;
+            return out.length ? out : null;
         } catch (e) { return null; }
     }
     function parseNyaaRegex(str) {
@@ -1950,48 +1953,99 @@
         try {
             var doc = new DOMParser().parseFromString(str, 'text/html');
             var rows = doc.querySelectorAll('table.torrent-list tbody tr');
+            if (!rows || !rows.length) {
+                var allTr = doc.getElementsByTagName('tr');
+                var tmp = [];
+                for (var k = 0; k < allTr.length; k++) {
+                    if (allTr[k].querySelector && allTr[k].querySelector('a[href^="magnet:"]')) tmp.push(allTr[k]);
+                }
+                rows = tmp;
+            }
             for (var i = 0; i < rows.length; i++) {
-                var tds = rows[i].querySelectorAll('td'); if (tds.length < 7) continue;
-                var a = tds[1].querySelector('a[href*="/view/"]') || tds[1].querySelector('a');
+                var row = rows[i];
+                var cells = row.querySelectorAll ? row.querySelectorAll('td') : [];
+                if (cells.length < 7) continue;
+                var a = cells[1].querySelector ? (cells[1].querySelector('a[href*="/view/"]') || cells[1].querySelector('a')) : null;
                 var title = a ? clean(a.getAttribute('title') || a.textContent || '') : '';
-                var mag = rows[i].querySelector('a[href^="magnet:"]'); var magnet = mag ? mag.getAttribute('href') : '';
+                var mag = row.querySelector ? row.querySelector('a[href^="magnet:"]') : null;
+                var magnet = mag ? mag.getAttribute('href') : '';
                 if (!title || !magnet) continue;
-                var hm = magnet.match(/btih:([a-zA-Z0-9]{32,40})/); var idm = (a && a.getAttribute('href') || '').match(/\/view\/(\d+)/);
-                var it = nyaaItemFrom({ title: title, hash: hm ? hm[1] : '', seeders: tds[5].textContent, peers: tds[6].textContent, size: tds[3].textContent, date: tds[4].textContent, id: idm ? idm[1] : '' });
+                var hm = magnet.match(/btih:([a-zA-Z0-9]{32,40})/);
+                var idm = (a && a.getAttribute('href') || '').match(/\/view\/(\d+)/);
+                var it = nyaaItemFrom({
+                    title: title, hash: hm ? hm[1] : '',
+                    seeders: cells[5].textContent, peers: cells[6].textContent,
+                    size: cells[3].textContent, date: cells[4].textContent,
+                    id: idm ? idm[1] : ''
+                });
                 if (it) { it.MagnetUri = magnet; items.push(it); }
             }
         } catch (e) {}
         return items;
     }
-    function nyaaRss(q, cat, sort) { return 'https://nyaa.si/?page=rss&c=' + cat + '&s=' + sort + '&o=desc&q=' + encodeURIComponent(q); }
+    function nyaaRssUrl(q, cat, sort, limit) { return 'https://nyaa.si/?page=rss&c=' + cat + '&s=' + sort + '&o=desc&limit=' + (limit || 75) + '&q=' + encodeURIComponent(q); }
     function nyaaHtmlUrl(q, cat, sort, page) { return 'https://nyaa.si/?f=0&c=' + cat + '&q=' + encodeURIComponent(q) + '&s=' + sort + '&o=desc&p=' + page; }
-    function nyaaSearch(cands, dm, cb) {
+
+    function nyaaSearch(cands, dm, isSeries, seasonNum, cb) {
         var ci = 0;
         function tryCandidate(cat) {
             if (ci >= cands.length) { if (cat === '1_2') { ci = 0; tryCandidate('0_0'); } else cb([]); return; }
-            var qq = cands[ci++]; var acc = [], page = 1, MAXP = 2;
-            function nextPage() {
-                if (page > MAXP) { addPopular(); return; }
-                fetchText(nyaaHtmlUrl(qq, cat, 'id', page), function (s) {
-                    var r = parseNyaaHtml(s);
-                    if (page === 1 && !r.length) {
-                        fetchText(nyaaRss(qq, cat, 'seeders'), function (rs) {
-                            var rr = parseNyaa(rs);
-                            if (rr.length) { acc = acc.concat(rr); addPopular(); } else tryCandidate(cat);
-                        }, looksNyaaRss);
-                        return;
-                    }
-                    acc = acc.concat(r); page++; nextPage();
-                }, looksNyaaHtml);
+            var qq = cands[ci++]; var acc = [];
+
+            function addSeasonPacks() {
+                if (!isSeries || !seasonNum) { afterPacks(); return; }
+                var sn = ('0' + seasonNum).slice(-2);
+                var packQs = [qq + ' S' + sn, qq + ' season ' + seasonNum, qq + ' batch'];
+                var pi = 0;
+                function nextPack() {
+                    if (pi >= packQs.length) { afterPacks(); return; }
+                    var pq = packQs[pi++];
+                    fetchText(nyaaHtmlUrl(pq, cat, 'id', 1), function (s) {
+                        if (s) acc = acc.concat(parseNyaaHtml(s));
+                        nextPack();
+                    }, function (s) { return s && /torrent-list|magnet:/i.test(s); });
+                }
+                nextPack();
             }
-            function addPopular() {
-                fetchText(nyaaHtmlUrl(qq, cat, 'seeders', 1), function (s) {
-                    acc = dedupeItems(acc.concat(parseNyaaHtml(s)));
-                    if (dm !== 'off') fetchText(nyaaRss(qq + ' dual audio', cat, 'seeders'), function (s3) { cb(dedupeItems(acc.concat(parseNyaa(s3)))); }, looksNyaaRss);
-                    else cb(acc);
-                }, looksNyaaHtml);
+
+            function afterPacks() {
+                if (dm !== 'off') {
+                    fetchText(nyaaRssUrl(qq + ' dual audio', cat, 'id', 75), function (s3) {
+                        if (s3) acc = acc.concat(parseNyaa(s3));
+                        cb(dedupeItems(acc));
+                    }, looksNyaaRss);
+                } else cb(dedupeItems(acc));
             }
-            nextPage();
+
+            if (isSeries) {
+                var page = 1, MAXP = 3;
+                function nextPage() {
+                    if (page > MAXP) { addSeasonPacks(); return; }
+                    fetchText(nyaaHtmlUrl(qq, cat, 'id', page), function (s) {
+                        if (!s) {
+                            if (page === 1) tryCandidate(cat);
+                            else addSeasonPacks();
+                            return;
+                        }
+                        var r = parseNyaaHtml(s);
+                        if (page === 1 && !r.length) { tryCandidate(cat); return; }
+                        acc = acc.concat(r);
+                        page++;
+                        nextPage();
+                    }, function (s) { return s && /torrent-list|magnet:/i.test(s); });
+                }
+                nextPage();
+            } else {
+                var accMovies = [];
+                fetchText(nyaaHtmlUrl(qq, cat, 'id', 1), function (s) {
+                    if (s) accMovies = accMovies.concat(parseNyaaHtml(s));
+                    fetchText(nyaaRssUrl(qq, cat, 'id', 150), function (rs) {
+                        if (rs) accMovies = accMovies.concat(parseNyaa(rs));
+                        acc = acc.concat(dedupeItems(accMovies));
+                        addSeasonPacks();
+                    }, looksNyaaRss);
+                }, function (s) { return s && /torrent-list|magnet:/i.test(s); });
+            }
         }
         tryCandidate('1_2');
     }
@@ -2079,7 +2133,7 @@
                 return function (cb2) { fn(function (res) { LAST.counts[id] = (res || []).length; if (!res) LAST.errors[id] = 'сеть/CF'; cb2(res); }); };
             }
             if (q) {
-                if (srcOn('nyaa')) tasks.push(track('nyaa', function (c) { nyaaSearch(cands, dm, c); }));
+                if (srcOn('nyaa')) tasks.push(track('nyaa', function (c) { nyaaSearch(cands, dm, isSeries, season, c); }));
                 if (srcOn('anidex')) tasks.push(track('anidex', function (c) {
                     var i = 0;
                     function next() { if (i >= cands.length) { c([]); return; } var qq = cands[i++]; fetchJson('https://anidex.info/api/?q=' + encodeURIComponent(qq) + '&s=seeders&o=desc', function (j) { var r = parseAnidex(j); if (r.length) c(r); else next(); }); }
@@ -2157,7 +2211,7 @@
         var title = 'Публичные трекеры (EN)';
         try { title = Lampa.Lang.translate('en_pub_title'); } catch (e) {}
         add({ name: PREFIX + 'section', type: 'title' }, { name: title });
-        add({ name: PREFIX + 'enabled', type: 'trigger', default: true }, { name: title, description: 'Добавлять результаты публичных зарубежных трекеров к поиску Lampa' });
+        add({ name: PREFIX + 'enabled', type: 'trigger', default: true }, { name: title, description: 'Под-переключатель публичных трекеров. Общий рубильник — кнопка EN в шапке: она выключает и v2, и публичные.' });
         add({ name: PREFIX + 'ru', type: 'trigger', default: false }, { name: 'Показывать русскую озвучку', description: 'Выкл = скрывать раздачи с явной русской озвучкой/дубляжом; [RUS] только в субтитрах не скрывает' });
         add({ name: PREFIX + 'dub', type: 'select', default: 'prefer', values: { off: 'Не фильтровать даб', prefer: 'Предпочитать английский даб', only: 'Только английский даб' } }, { name: 'Английский даб', description: 'prefer = дабы выше; only = скрыть релизы без пометки dub/dual audio' });
         SOURCES.forEach(function (s) { add({ name: PREFIX + 'src_' + s.id, type: 'trigger', default: s.def }, { name: s.title }); });
@@ -2226,10 +2280,11 @@
             catch (e) { stdDone = true; finish(false); }
         };
         Lampa.Parser._en_public_hooked = true;
-        console.log('[EN Public] hooked v1.12.0 (merged into EN Sources 2.12.0, no proxy)');
+        console.log('[EN Public] hooked v1.13.0 (merged into EN Sources 2.13.0, no proxy)');
         return true;
     }
     function start() {
+        try { if (Lampa.Storage.get('en_sources_v2_enabled') === undefined) Lampa.Storage.set('en_sources_v2_enabled', 'true'); } catch (e) {}
         register();
         var tries = 0, t = setInterval(function () {
             tries++; register(); wrapSort();
