@@ -78,7 +78,6 @@
     var YTS_HOSTS = ['yts.mx', 'yts.rs', 'yts.ag', 'yts.lt'];
     var EZTV_HOSTS = ['eztvx.to', 'eztv.re', 'eztv.ch'];
     var TPB_HOSTS = [
-        'apibay.org',
         'thepiratebay.org',
         'tpb.party',
         'thepiratebay.party',
