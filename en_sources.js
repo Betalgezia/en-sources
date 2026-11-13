@@ -78,6 +78,7 @@
     var YTS_HOSTS = ['yts.mx', 'yts.rs', 'yts.ag', 'yts.lt'];
     var EZTV_HOSTS = ['eztvx.to', 'eztv.re', 'eztv.ch'];
     var TPB_HOSTS = [
+        'apibay.org',
         'thepiratebay.org',
         'tpb.party',
         'thepiratebay.party',
@@ -708,10 +709,16 @@
         return !hasEpisode;
     }
 
+    function enRank(item) {
+        // подтверждённый EN — первым, неизвестный язык — посередине,
+        // подтверждённо не-EN (русская озвучка и т.п.) — в конец
+        return item.en_audio === true ? 0 : (item.en_audio === false ? 2 : 1);
+    }
+
     function compareForeign(a, b) {
         if (cfg.prefer_en) {
-            var ea = a.en_audio === true ? 0 : 1;
-            var eb = b.en_audio === true ? 0 : 1;
+            var ea = enRank(a);
+            var eb = enRank(b);
             if (ea !== eb) return ea - eb;
         }
         if (cfg.batches_first) {
@@ -845,15 +852,27 @@
                 if (/\/view\/\d+$/.test(href)) { viewLink = links[j]; break; }
             }
             if (!viewLink) {
+                // fallback: сначала ссылка без # (заголовок), затем — последняя /view/
                 for (var k = 0; k < links.length; k++) {
                     var h2 = links[k].getAttribute('href') || '';
-                    if (h2.indexOf('/view/') >= 0) { viewLink = links[k]; }
+                    if (h2.indexOf('/view/') >= 0 && h2.indexOf('#') < 0) {
+                        viewLink = links[k];
+                        break;
+                    }
+                }
+                if (!viewLink) {
+                    for (var k2 = 0; k2 < links.length; k2++) {
+                        var h3 = links[k2].getAttribute('href') || '';
+                        if (h3.indexOf('/view/') >= 0) viewLink = links[k2];
+                    }
                 }
             }
             var title = '';
             var id = '';
             if (viewLink) {
-                title = clean(viewLink.getAttribute('title') || viewLink.textContent || '');
+                var rawTitle = clean(viewLink.getAttribute('title') || '');
+                if (!rawTitle || /comments?/i.test(rawTitle)) rawTitle = clean(viewLink.textContent || '');
+                title = rawTitle;
                 var idm = (viewLink.getAttribute('href') || '').match(/\/view\/(\d+)/);
                 if (idm) id = idm[1];
             }
@@ -1307,8 +1326,11 @@
         if (!id) { callback(''); return; }
 
         var key = String(id);
-        if (Object.prototype.hasOwnProperty.call(imdbCache, key)) {
-            callback(imdbCache[key]);
+        var cached = imdbCache[key];
+        // Успешный результат кэшируем на час; «нет IMDb» — на 10 минут;
+        // ошибку сети не кэшируем, чтобы источник мог повторить позже.
+        if (cached && Date.now() - cached.time < (cached.imdb ? 3600000 : 600000)) {
+            callback(cached.imdb);
             return;
         }
 
@@ -1320,7 +1342,7 @@
 
         requestJson(url, function (err, json) {
             var out = (json && json.imdb_id) ? String(json.imdb_id) : '';
-            imdbCache[key] = out;
+            if (!err) imdbCache[key] = { imdb: out, time: Date.now() };
             callback(out);
         });
     }
@@ -1489,6 +1511,10 @@
 
             if (!cfg.enabled) return state.originalGet.call(self, params, oncomplete, onerror);
 
+            // Новый поиск отменяет предыдущие незавершённые внешние запросы
+            // (быстрое переключение карточек не должно тащить старые ответы).
+            cancelAll();
+
             var finished = false;
             var started = Date.now();
             var standardDone = !cfg.merge;
@@ -1504,6 +1530,12 @@
                 finished = true;
                 clearTimeout(guard);
                 state.lastByCard[key] = data;
+                // ограничиваем кеш карточек (LRU-подобно), чтобы не течь памяти
+                var cardKeys = [];
+                for (var ck in state.lastByCard) {
+                    if (Object.prototype.hasOwnProperty.call(state.lastByCard, ck)) cardKeys.push(ck);
+                }
+                while (cardKeys.length > 40) delete state.lastByCard[cardKeys.shift()];
                 try { oncomplete(data); } catch (e) { warn('oncomplete', e); }
             }
 
@@ -1586,7 +1618,14 @@
             state.originalTorrents = Orig;
 
             function Wrapped(object) {
-                Orig.call(this, object);
+                try {
+                    Orig.call(this, object);
+                } catch (e) {
+                    // страховка: если ядро переедет на ES6-класс, Orig.call бросит
+                    // TypeError — не роняем рендер torrents
+                    warn('component orig', e);
+                    return;
+                }
                 var sortResults = this.sortResults;
                 if (typeof sortResults !== 'function') return;
                 var key = cardKey(object || {});
